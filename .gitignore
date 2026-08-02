@@ -1,8 +1,9 @@
 # WorkBuddy agent state (local-only)
 /.workbuddy
 
-# Override global gitignore (**/local/) — keep the xai-grok-tools computer/local module
-!crates/codegen/xai-grok-tools/src/computer/local/
+# Override global gitignore (**/local/) — keep all crate-local `local/` modules
+# (e.g. xai-grok-tools/src/computer/local, xai-agent-lifecycle/src/local, etc.)
+!/**/local/
 
 # Local build configuration (protoc wrapper, cargo config)
 /.cargo/
