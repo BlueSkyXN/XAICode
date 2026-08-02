@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+# Only one release run at a time.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: xaicode
+
+jobs:
+  build:
+    name: "build / ${{ matrix.target }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            use-cross: false
+
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-cross: false
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92.0"
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: v1-release-${{ matrix.target }}
+
+      - name: Install DotSlash
+        run: |
+          set -euo pipefail
+          DOTSLASH_VERSION="0.2.1"
+          DOTSLASH_URL="https://github.com/dotslash-rs/dotslash/releases/download/v${DOTSLASH_VERSION}/dotslash-x86_64-unknown-linux-gnu.tar.gz"
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            DOTSLASH_URL="https://github.com/dotslash-rs/dotslash/releases/download/v${DOTSLASH_VERSION}/dotslash-aarch64-apple-darwin.tar.gz"
+          fi
+          echo "Downloading DotSlash from $DOTSLASH_URL"
+          curl -fsSL "$DOTSLASH_URL" -o /tmp/dotslash.tar.gz
+          tar -xzf /tmp/dotslash.tar.gz -C /tmp
+          sudo mv /tmp/dotslash /usr/local/bin/dotslash || mkdir -p "$HOME/.local/bin" && mv /tmp/dotslash "$HOME/.local/bin/dotslash"
+          echo "$(dirname "$(which dotslash)")" >> "$GITHUB_PATH"
+          dotslash --version
+
+      - name: Build xaicode binary
+        run: |
+          cargo build -p xaicode --profile release-dist --bin ${{ env.BIN_NAME }}
+          ls -la target/release-dist/${{ env.BIN_NAME }}
+
+      - name: Package artifact
+        id: pkg
+        run: |
+          set -euo pipefail
+          BIN="target/release-dist/${{ env.BIN_NAME }}"
+          NAME="xaicode-${{ matrix.target }}"
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ] && file "$BIN" | grep -q "ELF"; then
+            tar -czf "${NAME}.tar.gz" -C target/release-dist ${{ env.BIN_NAME }}
+          elif [ "${{ matrix.os }}" = "macos-latest" ] && file "$BIN" | grep -q "Mach-O"; then
+            tar -czf "${NAME}.tar.gz" -C target/release-dist ${{ env.BIN_NAME }}
+          else
+            echo "Unknown binary format:"; file "$BIN"; exit 1
+          fi
+          echo "artifact=${NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xaicode-${{ matrix.target }}
+          path: ${{ steps.pkg.outputs.artifact }}
+
+  release:
+    name: "draft release"
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      - name: List artifacts
+        run: find artifacts -type f -ls
+
+      - name: Create Release draft
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          draft: true
+          generate_release_notes: true
+          tag_name: ${{ github.ref_name }}
+          files: artifacts/**/*/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,21 @@
+# WorkBuddy agent state (local-only)
+/.workbuddy
+
+# Local build configuration (protoc wrapper, cargo config)
+/.cargo/
+
+# Repository reference sources (audit baseline, not part of the product)
+/local/
+
+# Build artifacts
+/target/
+
+# Rust backup files
+**/*.rs.bk
+
+# macOS
+.DS_Store
+
+# Editors
+**/.vscode/
+**/.idea/

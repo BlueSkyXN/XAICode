@@ -1,0 +1,42 @@
+{
+  "default": "local-model",
+  "web_search": "local-model",
+  "image_description": "local-model",
+  "session_summary": "local-model",
+  "models": [
+    {
+      "id": "local-model",
+      "model": "local-model",
+      "name": "Local model",
+      "description": "Model served by the configured OpenAI-compatible provider",
+      "context_window": 200000,
+      "api_backend": "responses",
+      "supports_backend_search": false,
+      "system_prompt_label": "Local model",
+      "show_model_fingerprint": false,
+      "supports_reasoning_effort": true,
+      "reasoning_effort": "high",
+      "auto_compact_threshold_percent": 80,
+      "compaction_at_tokens": true,
+      "compactions_remaining": 1,
+      "reasoning_efforts": [
+        {
+          "value": "high",
+          "label": "High Effort",
+          "description": "Highest implementation quality with extensive reasoning",
+          "default": true
+        },
+        {
+          "value": "medium",
+          "label": "Medium Effort",
+          "description": "Balanced effort with standard implementation and testing"
+        },
+        {
+          "value": "low",
+          "label": "Low Effort",
+          "description": "Quick, fast implementations"
+        }
+      ]
+    }
+  ]
+}
