@@ -65,7 +65,7 @@ impl Mixpanel {
         #[cfg(not(test))]
         {
             let _ = (event, properties);
-            return Ok(());
+            Ok(())
         }
         #[cfg(test)]
         {
@@ -100,7 +100,7 @@ impl Mixpanel {
         #[cfg(not(test))]
         {
             let _ = (distinct_id, set);
-            return Ok(());
+            Ok(())
         }
         #[cfg(test)]
         {
