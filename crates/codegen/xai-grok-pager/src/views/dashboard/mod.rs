@@ -86,13 +86,16 @@ pub fn overlay_cycle_order(
 ///
 /// `var_os` avoids the per-call allocation of `var`.
 pub fn dashboard_enabled() -> bool {
+    // `GROK_AGENT_DASHBOARD` is the legacy env var; `CODING_AGENT_DASHBOARD`
+    // is the current one. Both are checked unconditionally (not gated behind
+    // `cfg!(test)`) because this function is in a library crate — `cfg!(test)`
+    // is false when the lib is compiled, so the check would never fire.
     let disabled = std::env::var_os("CODING_AGENT_DASHBOARD")
         .as_deref()
         .is_some_and(|v| v == std::ffi::OsStr::new("0"))
-        || (cfg!(test)
-            && std::env::var_os("GROK_AGENT_DASHBOARD")
-                .as_deref()
-                .is_some_and(|v| v == std::ffi::OsStr::new("0")));
+        || std::env::var_os("GROK_AGENT_DASHBOARD")
+            .as_deref()
+            .is_some_and(|v| v == std::ffi::OsStr::new("0"));
     if disabled {
         return false;
     }
