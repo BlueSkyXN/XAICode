@@ -47,19 +47,7 @@ jobs:
           key: v1-release-${{ matrix.target }}
 
       - name: Install DotSlash
-        run: |
-          set -euo pipefail
-          DOTSLASH_VERSION="0.2.1"
-          DOTSLASH_URL="https://github.com/dotslash-rs/dotslash/releases/download/v${DOTSLASH_VERSION}/dotslash-x86_64-unknown-linux-gnu.tar.gz"
-          if [ "${{ matrix.os }}" = "macos-latest" ]; then
-            DOTSLASH_URL="https://github.com/dotslash-rs/dotslash/releases/download/v${DOTSLASH_VERSION}/dotslash-aarch64-apple-darwin.tar.gz"
-          fi
-          echo "Downloading DotSlash from $DOTSLASH_URL"
-          curl -fsSL "$DOTSLASH_URL" -o /tmp/dotslash.tar.gz
-          tar -xzf /tmp/dotslash.tar.gz -C /tmp
-          sudo mv /tmp/dotslash /usr/local/bin/dotslash || mkdir -p "$HOME/.local/bin" && mv /tmp/dotslash "$HOME/.local/bin/dotslash"
-          echo "$(dirname "$(which dotslash)")" >> "$GITHUB_PATH"
-          dotslash --version
+        uses: facebook/install-dotslash@latest
 
       - name: Build xaicode binary
         run: |
