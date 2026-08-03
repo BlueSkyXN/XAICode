@@ -62,8 +62,8 @@ jobs:
       - name: cargo check -p xaicode
         run: cargo check -p xaicode
 
-      - name: cargo clippy -p xaicode
-        run: cargo clippy -p xaicode -- -D warnings
+      - name: cargo clippy -p xaicode --no-deps
+        run: cargo clippy -p xaicode --no-deps -- -D warnings
 
       - name: cargo fmt --check
         run: cargo fmt --check --all
