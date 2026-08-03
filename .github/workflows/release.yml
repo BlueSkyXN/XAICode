@@ -66,6 +66,14 @@ jobs:
           cargo build -p xaicode --profile release-dist --bin ${{ env.BIN_NAME }}
           ls -la target/release-dist/${{ env.BIN_NAME }}
 
+      - name: Smoke test xaicode binary
+        run: |
+          set -euo pipefail
+          BIN="target/release-dist/${{ env.BIN_NAME }}"
+          test -x "$BIN"
+          "$BIN" --version
+          "$BIN" --help >/dev/null
+
       - name: Package artifact
         id: pkg
         run: |
