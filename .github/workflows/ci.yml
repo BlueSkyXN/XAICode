@@ -19,6 +19,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  maintenance:
+    name: "maintenance contract"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate upstream provenance and clean contract
+        run: python3 scripts/xaicode_maintenance.py check-contract
+
   check:
     name: "check / ${{ matrix.os }}"
     strategy:
@@ -48,10 +61,10 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           dotslash --version
 
-      - name: Install Rust 1.92.0
+      - name: Install Rust 1.94.0
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.92.0"
+          toolchain: "1.94.0"
           components: rustfmt, clippy
           targets: ${{ matrix.target }}
 
@@ -97,10 +110,10 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           dotslash --version
 
-      - name: Install Rust 1.92.0
+      - name: Install Rust 1.94.0
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.92.0"
+          toolchain: "1.94.0"
           components: clippy
           targets: ${{ matrix.target }}
 
@@ -110,3 +123,43 @@ jobs:
 
       - name: cargo test -p xaicode
         run: cargo test -p xaicode --all-targets
+
+  clean-boundary:
+    name: "clean provider boundary / ubuntu"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install DotSlash
+        run: |
+          set -euo pipefail
+          DOTSLASH_VERSION="v0.5.9"
+          DOTSLASH_ASSET="dotslash-linux-musl.x86_64.tar.gz"
+          curl -fsSL "https://github.com/facebook/dotslash/releases/download/${DOTSLASH_VERSION}/${DOTSLASH_ASSET}" -o /tmp/dotslash.tar.gz
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/dotslash.tar.gz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          dotslash --version
+
+      - name: Install Rust 1.94.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: v1-ubuntu-clean-boundary
+
+      - name: Build xaicode
+        run: cargo build -p xaicode --bin xaicode
+
+      - name: Validate clean custom-provider egress and persistence
+        env:
+          GROK_BINARY: ${{ github.workspace }}/target/debug/xaicode
+        run: |
+          cargo test -p xai-grok-shell \
+            --test test_global_extra_headers_e2e \
+            clean_custom_provider -- --ignored
+
+      - name: Validate provider query parameters and environment headers
+        run: cargo test -p xai-grok-sampler --test request_query_and_headers

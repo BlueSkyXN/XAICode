@@ -456,6 +456,7 @@ fn field_parse_error(field: &str, value: &toml::Value) -> Option<toml::de::Error
 mod tests {
     use super::*;
     use crate::sampling::ApiBackend;
+    use xai_grok_sampler::AuthScheme;
     use xai_grok_sampling_types::{
         CompactionAtTokens, CompactionsRemaining, ReasoningEffort, ReasoningEffortOption,
     };
@@ -561,6 +562,29 @@ mod tests {
                 "unknown field".to_owned(),
             )]
         );
+    }
+
+    #[test]
+    fn auth_scheme_is_preserved_in_model_override() {
+        let cfg = parse_cfg(
+            r#"
+            [model.messages]
+            model = "messages-model"
+            base_url = "https://messages.example/v1"
+            api_key = "test-key"
+            api_backend = "messages"
+            auth_scheme = "x_api_key"
+            context_window = 200000
+            "#,
+        );
+        assert!(
+            cfg.config_warnings.is_empty(),
+            "auth_scheme must be a recognized model field: {:?}",
+            cfg.config_warnings
+        );
+        let resolved = crate::agent::config::resolve_model_list(&cfg, None);
+        let model = resolved.get("messages").expect("configured model");
+        assert_eq!(model.info.auth_scheme, AuthScheme::XApiKey);
     }
 
     /// An unknown field warns the same whether or not another field fails to
@@ -694,6 +718,7 @@ mod tests {
             temperature: Some(0.5),
             top_p: Some(0.9),
             api_backend: Some(ApiBackend::Messages),
+            auth_scheme: Some(AuthScheme::XApiKey),
             extra_headers: [("x-team".to_owned(), "codegen".to_owned())]
                 .into_iter()
                 .collect(),

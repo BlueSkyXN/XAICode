@@ -11,7 +11,7 @@ use toml::Value as TomlValue;
 ///
 /// This is a lightweight channel-name helper retained for compatibility
 /// metadata; the clean build has no updater dependency.
-pub fn channel_name_from_cache() -> Option<&'static str> {
+pub(crate) fn channel_name_from_cache() -> Option<&'static str> {
     use std::sync::OnceLock;
     static NAME: OnceLock<Option<&'static str>> = OnceLock::new();
     *NAME.get_or_init(|| {

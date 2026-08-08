@@ -1,6 +1,6 @@
 # Custom Hooks Guide
 
-Hooks let you run custom scripts or HTTP requests at key moments during a Grok session — for example, before or after a tool runs, when a session starts or ends, or when the agent sends a notification.
+Hooks let you run custom scripts or HTTP requests at key moments during a XAICode session — for example, before or after a tool runs, when a session starts or ends, or when the agent sends a notification.
 
 They are perfect for automation, safety checks, logging, notifications, and integrating with your own tools.
 
@@ -29,7 +29,7 @@ Common use cases:
        "SessionStart": [
          {
            "hooks": [
-            { "type": "command", "command": "echo \"🚀 Grok session started in $(pwd)\"" }
+            { "type": "command", "command": "echo \"🚀 XAICode session started in $(pwd)\"" }
            ]
          }
        ]
@@ -37,7 +37,7 @@ Common use cases:
    }
    ```
 
-3. Start (or restart) a Grok session. The hook runs automatically on `SessionStart`.
+3. Start (or restart) a XAICode session. The hook runs automatically on `SessionStart`.
 
    Try it: press `Ctrl+L` on non–VS Code family (or run `/hooks` anywhere — preferred on VS Code / Cursor / Windsurf / Zed) and check the Hooks tab to confirm it's loaded.
 
@@ -92,7 +92,7 @@ Key fields:
 - **command**: Path to executable (relative to the JSON file) or inline shell command.
 - **timeout**: Seconds before killing the hook (default: 5, or 600 for `Stop`/`SubagentStop` gates). Hooks fail open on timeout.
 
-**Tool name aliases**: Claude-style names like `Bash`, `Edit`, `Read` automatically match Grok's internal names (`run_terminal_cmd`, `search_replace`, `read_file`).
+**Tool name aliases**: Claude-style names like `Bash`, `Edit`, `Read` automatically match XAICode's internal names (`run_terminal_cmd`, `search_replace`, `read_file`).
 
 ## Writing Hook Scripts
 
@@ -127,7 +127,7 @@ For events like `SessionStart` or `PostToolUse`, stdout is ignored. Just exit 0 
 
 ### Useful Environment Variables
 
-Grok injects the following variables into every hook process:
+XAICode injects the following variables into every hook process:
 
 - `GROK_HOOK_EVENT` — the event name (e.g. `pre_tool_use`, `session_start`, `post_tool_use`)
 - `GROK_HOOK_NAME` — the full configured name of this hook
@@ -177,7 +177,7 @@ config-load time:
 
 Lookup order for each reference:
 1. The handler's own `env` map.
-2. The current process environment (the env Grok itself sees).
+2. The current process environment (the env XAICode itself sees).
 
 If a reference is unset in both, it's **preserved verbatim** (e.g. `${UNSET}`
 stays as the literal string). The runtime `sh -c` branch may resolve it later

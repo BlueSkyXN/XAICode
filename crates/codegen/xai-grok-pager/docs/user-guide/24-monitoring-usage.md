@@ -1,6 +1,6 @@
 # Monitoring and Usage
 
-The clean build records local session state needed for the TUI, ACP, context
+XAICode records local session state needed for the TUI, ACP, context
 compaction, and `/usage` display. It does not send product analytics, Sentry,
 Mixpanel, OTLP, trace uploads, feedback, heap profiles, or unified-log events
 to a hosted service.
@@ -12,7 +12,7 @@ to a hosted service.
   entries.
 - `RUST_LOG=debug` enables local diagnostic logging to stderr.
 - `/usage` shows the in-process token/context ledger for the current session;
-  it is not account credit or subscription usage.
+  it is not account credit, subscription, or billing usage.
 - `/trace` (where exposed by a compatibility client) exports a local file only.
 
 ## Legacy settings
@@ -27,5 +27,5 @@ legacy flag cannot re-enable network telemetry.
 
 If an organization needs monitoring, collect the process's local stdout/stderr,
 exit codes, session files, or provider-side metrics from the explicitly
-configured OpenAI-compatible endpoint. The Xaicode itself does not proxy
-those records through a vendor control plane.
+configured OpenAI-compatible endpoint. XAICode itself does not proxy those
+records through a vendor control plane.

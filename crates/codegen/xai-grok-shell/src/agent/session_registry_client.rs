@@ -193,11 +193,17 @@ impl SessionRegistryClient {
         self
     }
 
+    /// Execute with auth middleware, returning the response plus the
+    /// bearer suffix the middleware stamped (for truthful 401
+    /// attribution in [`Self::check_response`]).
     async fn send_authed(
         &self,
         builder: RequestBuilder,
         op: &'static str,
-    ) -> Result<reqwest::Response> {
+    ) -> Result<(
+        reqwest::Response,
+        Option<xai_grok_auth::StampedBearerSuffix>,
+    )> {
         // Session replication/search/download is a hosted product service.
         // Retain the client type for local persistence compatibility, but make
         // every request fail closed before a socket or signed download URL is
@@ -210,10 +216,12 @@ impl SessionRegistryClient {
         #[allow(unreachable_code)]
         let builder = xai_file_utils::trace_context::inject_trace_context_into_request(builder);
         let request = builder.build().context(op)?;
-        self.client.execute(request).await.map_err(|e| match e {
-            reqwest_middleware::Error::Middleware(e) => e.context(op),
-            reqwest_middleware::Error::Reqwest(e) => anyhow::Error::from(e).context(op),
-        })
+        xai_grok_auth::execute_with_stamp(&self.client, request)
+            .await
+            .map_err(|e| match e {
+                reqwest_middleware::Error::Middleware(e) => e.context(op),
+                reqwest_middleware::Error::Reqwest(e) => anyhow::Error::from(e).context(op),
+            })
     }
 
     /// Non-auth headers only -- the `Authorization` header lives in
@@ -222,9 +230,14 @@ impl SessionRegistryClient {
         builder
     }
 
-    fn check_response(&self, response: reqwest::Response, op: &str) -> anyhow::Error {
+    fn check_response(
+        &self,
+        response: reqwest::Response,
+        stamp: Option<&xai_grok_auth::StampedBearerSuffix>,
+        op: &str,
+    ) -> anyhow::Error {
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            self.record_401_attribution(op);
+            self.record_401_attribution(op, stamp);
             anyhow::anyhow!("{op}: {}", self.credentials.auth_error_hint())
         } else {
             anyhow::anyhow!("{op} failed: {}", response.status())
@@ -235,19 +248,17 @@ impl SessionRegistryClient {
     /// `consumer = "SessionRegistryClient.<op>"`. The op string is the
     /// operation name passed to `check_response` (e.g.,
     /// `"session register"`).
-    fn record_401_attribution(&self, op: &str) {
+    ///
+    /// `stamp` is what the middleware put on the wire (see
+    /// [`xai_grok_auth::StampedBearerSuffix`] for why never a re-resolution).
+    fn record_401_attribution(&self, op: &str, stamp: Option<&xai_grok_auth::StampedBearerSuffix>) {
         if let Some(manager) = self.credentials.auth_manager() {
-            let resolved = self.credentials.resolve();
-            let sent = resolved
-                .deployment_key
-                .clone()
-                .or(resolved.user_token.clone());
             crate::auth::attribution::record_consumer_401(
                 manager.as_ref(),
                 self.session_id.as_deref(),
                 crate::auth::attribution::ConsumerKind::SessionRegistryClient,
                 op,
-                sent.as_deref(),
+                stamp.map(|s| s.0.as_str()),
             );
         }
     }
@@ -263,11 +274,11 @@ impl SessionRegistryClient {
     /// POST /v1/sessions/register (idempotent via ON CONFLICT)
     pub async fn register(&self, req: &RegisterRequest) -> Result<()> {
         let url = format!("{}/sessions/register", self.base_url);
-        let response = self
+        let (response, stamp) = self
             .send_authed(self.post(&url).json(req), "session register")
             .await?;
         if !response.status().is_success() {
-            return Err(self.check_response(response, "session register"));
+            return Err(self.check_response(response, stamp.as_ref(), "session register"));
         }
         Ok(())
     }
@@ -275,11 +286,11 @@ impl SessionRegistryClient {
     /// POST /v1/sessions/{id}/replicas/update
     pub async fn update(&self, session_id: &str, req: &UpdateRequest) -> Result<()> {
         let url = format!("{}/sessions/{}/replicas/update", self.base_url, session_id);
-        let response = self
+        let (response, stamp) = self
             .send_authed(self.post(&url).json(req), "session update")
             .await?;
         if !response.status().is_success() {
-            return Err(self.check_response(response, "session update"));
+            return Err(self.check_response(response, stamp.as_ref(), "session update"));
         }
         Ok(())
     }
@@ -290,11 +301,11 @@ impl SessionRegistryClient {
             "{}/sessions/{}/replicas/finalize",
             self.base_url, session_id
         );
-        let response = self
+        let (response, stamp) = self
             .send_authed(self.post(&url), "session finalize")
             .await?;
         if !response.status().is_success() {
-            return Err(self.check_response(response, "session finalize"));
+            return Err(self.check_response(response, stamp.as_ref(), "session finalize"));
         }
         Ok(())
     }
@@ -306,9 +317,9 @@ impl SessionRegistryClient {
         if let Some(q) = query {
             builder = builder.query(&[("query", q)]);
         }
-        let response = self.send_authed(builder, "session search").await?;
+        let (response, stamp) = self.send_authed(builder, "session search").await?;
         if !response.status().is_success() {
-            return Err(self.check_response(response, "session search"));
+            return Err(self.check_response(response, stamp.as_ref(), "session search"));
         }
         let resp: SearchResponse = response.json().await.context("parse search response")?;
         Ok(resp.sessions)
@@ -317,15 +328,15 @@ impl SessionRegistryClient {
     /// GET /v1/sessions/{id}/replicas
     pub async fn get_session(&self, session_id: &str) -> Result<SessionRecord> {
         let url = format!("{}/sessions/{}/replicas", self.base_url, session_id);
-        let response = self.send_authed(self.get(&url), "session get").await?;
+        let (response, stamp) = self.send_authed(self.get(&url), "session get").await?;
         if !response.status().is_success() {
-            return Err(self.check_response(response, "session get"));
+            return Err(self.check_response(response, stamp.as_ref(), "session get"));
         }
         response.json().await.context("parse session response")
     }
 
     /// GET /v1/sessions/{id}/download — returns a signed GCS URL without downloading.
-    pub async fn get_download_url(
+    pub(crate) async fn get_download_url(
         &self,
         session_id: &str,
         file: &str,
@@ -335,9 +346,9 @@ impl SessionRegistryClient {
         let builder = self
             .get(&url)
             .query(&[("file", file), ("turn", &turn.to_string())]);
-        let response = self.send_authed(builder, "session download url").await?;
+        let (response, stamp) = self.send_authed(builder, "session download url").await?;
         if !response.status().is_success() {
-            return Err(self.check_response(response, "session download url"));
+            return Err(self.check_response(response, stamp.as_ref(), "session download url"));
         }
         let resp: DownloadResponse = response.json().await.context("parse download response")?;
         Ok(resp.download_url)
@@ -355,9 +366,9 @@ impl SessionRegistryClient {
         let builder = self
             .get(&url)
             .query(&[("file", file), ("turn", &turn.to_string())]);
-        let response = self.send_authed(builder, "session download").await?;
+        let (response, stamp) = self.send_authed(builder, "session download").await?;
         if !response.status().is_success() {
-            return Err(self.check_response(response, "session download"));
+            return Err(self.check_response(response, stamp.as_ref(), "session download"));
         }
         let resp: DownloadResponse = response.json().await.context("parse download response")?;
 

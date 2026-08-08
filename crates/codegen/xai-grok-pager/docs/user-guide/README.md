@@ -1,8 +1,9 @@
-# Xaicode user guide
+# XAICode user guide
 
 This guide belongs to the local-only derivative of the upstream Rust TUI.
-The supported entry point is `xaicode`; `coding-agent` and the original
-`xai-grok-pager` binary names remain available as compatibility aliases.
+The supported entry point is `xaicode`; only the historical `xai-grok-pager`
+binary remains as a compatibility alias. No other product binary aliases are
+declared.
 
 ## Start locally
 

@@ -184,6 +184,7 @@ impl xai_tool_runtime::Tool for GlobTool {
         crate::util::detach_command(&mut cmd);
         cmd.stdin(Stdio::null());
 
+        #[allow(clippy::disallowed_methods)] // search helper, waited on below
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -281,7 +282,7 @@ impl xai_tool_runtime::Tool for GlobTool {
         }
 
         // ── Sort by mtime descending (most recent first) ────────
-        entries.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.mtime_ms));
 
         // ── Format output ───────────────────────────────────────
         let count = entries.len();

@@ -1,6 +1,6 @@
 # Session Management
 
-Xaicode saves every conversation to disk automatically. Whether you work
+XAICode saves every conversation to disk automatically. Whether you work
 in the TUI, headless mode, or over agent stdio, it records the exchange as a
 local session that can be resumed, rewound, or compacted.
 
@@ -13,7 +13,7 @@ A session is a persistent conversation with full history. It includes:
 - All user prompts and agent responses
 - Tool calls and their results
 - TODO/task list state
-- File snapshots for rewind
+- Rewind points for undoing later turns
 - Token usage and turn counts
 - Subagent sessions (when enabled)
 
@@ -25,7 +25,7 @@ this upstream-compatible path variable is retained for local data migration.
 
 ## Storage Layout
 
-Grok stores each session in its own directory, grouped by working directory. It URL-encodes the working directory to name the group. When the encoded name exceeds 255 bytes, it instead uses a slug plus a hash and records the original path in a `.cwd` file inside the group.
+XAICode stores each session in its own directory, grouped by working directory. It URL-encodes the working directory to name the group. When the encoded name exceeds 255 bytes, it instead uses a slug plus a hash and records the original path in a `.cwd` file inside the group.
 
 ```
 ~/.grok/sessions/<encoded-cwd>/<session-id>/
@@ -33,7 +33,7 @@ Grok stores each session in its own directory, grouped by working directory. It 
   updates.jsonl           # ACP session update stream (conversation + tool calls)
   chat_history.jsonl      # raw chat messages sent to the model
   plan.json               # TODO/task list state
-  rewind_points.jsonl     # file snapshots for /rewind undo
+  rewind_points.jsonl     # rewind points for /rewind undo
   signals.json            # session signals (token usage, tool/turn counters)
   compaction_checkpoints/ # saved state from compaction (manual or auto)
   subagents/              # per-subagent metadata (meta.json); the child sessions live in the normal sessions tree
@@ -57,13 +57,13 @@ This clears the current context and begins a new conversation. Alias: `/clear`.
 
 ### Exit
 
-End the session and quit Grok:
+End the session and quit XAICode:
 
 ```
 /quit
 ```
 
-Alias: `/exit`. To leave the current session but stay in Grok, use `/home` to return to the welcome screen.
+Alias: `/exit`. To leave the current session but stay in XAICode, use `/home` to return to the welcome screen.
 
 ### Delete the current session
 
@@ -71,7 +71,7 @@ Alias: `/exit`. To leave the current session but stay in Grok, use `/home` to re
 /delete
 ```
 
-Confirms, then permanently removes the session history and returns to the welcome screen. From `/resume`, press `d` then `y` on a row to delete a session you are not currently in.
+Confirms, then permanently removes the session history. Returns to the welcome screen, or to the dashboard when you opened the session from the dashboard. From `/resume` or the welcome session list, press `d` then `y`. On the [Agent Dashboard](23-dashboard.md), `Ctrl+X` twice (or hover `[✗]`) permanently deletes.
 
 ---
 
@@ -101,7 +101,7 @@ xaicode --resume <session-id-or-title>
 
 A value that is not a session ID is matched against session titles for the current directory, ignoring letter case (a simple lowercase comparison) — handy after `/rename`. If several sessions share the title, a single manually renamed session wins over auto-generated duplicates; otherwise the command errors and lists the matching IDs. UUID-shaped values are always treated as session IDs, never titles. Scripts should prefer IDs.
 
-Run `grok --resume` without a value to resume the most recent session for the current directory.
+Run `xaicode --resume` without a value to resume the most recent session for the current directory.
 
 ### From the Welcome Screen
 
@@ -135,22 +135,22 @@ Alias: `/title`.
 
 ## The /rewind Command
 
-`/rewind` undoes recent changes by restoring files to their state at an earlier point in the conversation. Use it to recover from mistakes.
+`/rewind` (alias `/undo`) rewinds the conversation to an earlier turn, dropping later turns. File changes made after that turn are left as-is on disk.
 
 ```
 /rewind
+/undo
 ```
 
-When you run `/rewind` (or press **Esc Esc** within 800ms while idle with an empty prompt and conversation messages), Grok:
+When you run `/rewind` or `/undo` (or press **Esc Esc** within 800ms while idle with an empty prompt and conversation messages), XAICode:
 
 1. Shows a list of rewind points (one per user prompt)
 2. Lets you select which point to rewind to
-3. Restores all files to their state at that point
-4. Truncates the conversation history to that point
+3. Truncates the conversation history to that point
 
-File snapshots are recorded at each prompt, so you can go back to any previous state.
+When **Confirm before rewind** is on (default in `/settings`), every pick asks for confirmation (Yes / Yes, and don't ask again / No). **Yes, and don't ask again** turns that setting off. With the setting off, picks run immediately.
 
-**Important:** `/rewind` modifies files on disk. The changes it reverts are lost unless you have them in git.
+**Important:** `/rewind` does not restore files on disk. Only conversation history is truncated.
 
 ---
 
@@ -167,7 +167,7 @@ The optional `context` argument lets you provide additional instructions about w
 
 ### Auto-Compact
 
-Grok automatically compacts the conversation when the context window approaches its limit. You will see a notification when auto-compact triggers. The `context_window` setting on your model configuration controls when this threshold is reached.
+XAICode automatically compacts the conversation when the context window approaches its limit. You will see a notification when auto-compact triggers. The `context_window` setting on your model configuration controls when this threshold is reached.
 
 ---
 
@@ -242,36 +242,69 @@ The agent persists all session updates automatically. Clients can reconnect and 
 
 ---
 
-## The grok sessions Subcommand
+## The `xaicode sessions` Subcommand
 
-List or search sessions from the command line. `grok sessions` requires a subcommand:
+List or search local sessions from the command line. `xaicode sessions` requires a subcommand:
 
 ```bash
 # List recent sessions for the current directory
-grok sessions list
+xaicode sessions list
 
 # Limit the number of results (default 20)
-grok sessions list --limit 50
+xaicode sessions list --limit 50
 
 # Search sessions by keyword (matches titles and prompts)
-grok sessions search "rate limit"
+xaicode sessions search "rate limit"
 ```
 
-`grok sessions list` shows sessions for the current working directory, grouped by worktree label. Each row lists the session ID, the creation and update dates, the source status, and the summary. `grok sessions search` combines a local SQLite index with remote results.
+`xaicode sessions list` shows sessions for the current working directory, grouped by worktree label. Each row lists the session ID, the creation and update dates, the source status, and the summary. `xaicode sessions search` uses the local SQLite index; it does not contact a remote registry.
 
 ---
 
 ## Worktree Sessions
 
-When working with subagents or session forks, Grok can create isolated git worktrees per session. Each worktree gets its own copy of the working directory, so file changes in one session do not affect another.
+When working with subagents or session forks, XAICode can create isolated local git worktrees per session. Each worktree gets its own copy of the working directory, so file changes in one session do not affect another.
 
-Worktree sessions are managed internally through the `x.ai/git/worktree/*` extension methods. Key operations:
+Worktree sessions are managed locally through the compatible `x.ai/git/worktree/*` extension methods. Key operations:
 
 - **Create**: Create a new worktree for an isolated session
 - **Apply**: Merge worktree changes back into the main working directory
 - **Remove**: Clean up a worktree when the session is done
 
-Resume a session in a fresh worktree with `grok -w -r <session-id>`.
+Resume a session in a fresh worktree with `xaicode -w -r <session-id>`.
+
+### Checking Disk Usage
+
+`xaicode du` (alias: `xaicode disk-usage`) reports what the local home (`~/.grok`) uses on disk. It lists each top-level directory, largest first, then each worktree with its size, type, age, label, and path. Worktrees the local registry does not track appear as `untracked`. Pass `--json` for the same report as machine-readable output.
+
+```text
+Disk usage for ~/.grok
+    412.3 GB  worktrees
+      1.2 GB  sessions
+    412.0 MB  (top-level files)
+    413.9 GB  total
+  Worktree clones share storage with their source, so the total can exceed real disk use.
+
+Worktrees
+        SIZE  TYPE                AGE        LABEL  PATH
+    380.0 GB  session             12d ago    my-fix ~/.grok/worktrees/local/worktree-abc
+     32.3 GB  untracked (session) 40d ago           ~/.grok/worktrees/local/worktree-old
+
+To reclaim space, run `xaicode worktree gc --max-age 7d --dry-run`, then the same command without `--dry-run`. Without `--max-age`, gc expires nothing.
+Untracked rows are not in the local registry, so gc never visits them. Remove one with `xaicode worktree rm --dry-run <path>`, then without `--dry-run`.
+```
+
+`AGE` is the value `xaicode worktree gc` measures: time since the worktree was last accessed, or since it was created when that is more recent. Session and agent activity update it; a shell or editor left open in the directory does not. An untracked worktree has no registry entry, so its age comes from the newest file underneath it.
+
+Sizes are physical block counts on Unix and logical file sizes elsewhere, matching what `xaicode worktree show` reports. A worktree clone shares storage with its source and each copy counts in full, so the total can exceed both `du -sh` and the space actually in use. When the total exceeds the used space on the volume, the report says so. `--json` carries the same figures as `volume_capacity_bytes` and `volume_available_bytes`.
+
+The report measures a single filesystem, the one holding the local home. A directory on any other filesystem stays out of the total and is counted in `other_filesystem_dirs`, and its worktree rows show `-` for size (`null` in `--json`). A top-level symlink to a directory, such as a relocated `worktrees`, is counted in `unfollowed_dir_symlinks`; its target stays out of the total, though the rows below it are still sized. Directories and entries the report could not read are counted in `unreadable_dirs` and `unstatable_entries`. Run `RUST_LOG=debug xaicode du` to name each one.
+
+Every worktree row in `--json` also carries `created_at`, `last_accessed_at`, and `last_modified_at` in unix seconds, plus `repo_name` and `git_ref`. Registry fields are `null` for untracked rows. `git_ref` is the branch recorded when the worktree was registered, not the branch checked out now.
+
+When the local registry is unavailable, every row appears as `untracked` and the report names the reason. The `--json` `registry` field carries the same value: `read`, `absent`, `busy`, `unopenable`, or `corrupt`. A `busy` registry is held by another process, so retry. An `unopenable` one has a permission or I/O problem, so check the file. A `corrupt` one is the only case that calls for deletion: remove the file the report names, then run `xaicode worktree db rebuild`.
+
+To reclaim space, run `xaicode worktree gc --max-age 7d`, which removes tracked worktrees older than the age you give. Without `--max-age`, gc expires nothing, and it visits only worktrees the local registry tracks. Remove an untracked worktree with `xaicode worktree rm <path>`. Both commands take `--dry-run` and report what they would do: gc counts the worktrees it would remove, and `rm` names the path. Neither inspects the working tree for uncommitted or unpushed work, so read the preview first.
 
 ---
 
@@ -279,13 +312,13 @@ Resume a session in a fresh worktree with `grok -w -r <session-id>`.
 
 ### Persistence Format
 
-Grok stores the conversation as newline-delimited JSON (JSONL). Each line in `updates.jsonl` is a self-contained ACP session update event. This format supports:
+XAICode stores the conversation as newline-delimited JSON (JSONL). Each line in `updates.jsonl` is a self-contained ACP session update event. This format supports:
 
 - Incremental writes (append-only during a session)
 - Efficient streaming reads (for session restore)
 - Easy debugging (each line is valid JSON)
 
-The smaller state files -- `summary.json`, `plan.json`, and `signals.json` -- are plain JSON rather than JSONL. JSONL is the source of truth for session content; `grok sessions search` additionally maintains a local SQLite FTS5 index over session titles and prompts for fast keyword search.
+The smaller state files -- `summary.json`, `plan.json`, and `signals.json` -- are plain JSON rather than JSONL. JSONL is the source of truth for session content; `xaicode sessions search` additionally maintains a local SQLite FTS5 index over session titles and prompts for fast keyword search.
 
 ### Session Metadata
 
@@ -301,7 +334,7 @@ The smaller state files -- `summary.json`, `plan.json`, and `signals.json` -- ar
 
 ### Disk Usage
 
-Rewind point snapshots (copies of modified files) are the largest contributor to disk usage in sessions that modify many files. Use `/compact` to reduce history size.
+Session history (`updates.jsonl`, `chat_history.jsonl`) dominates disk usage in long sessions. Use `/compact` to reduce history size.
 
 ---
 
@@ -309,6 +342,6 @@ Rewind point snapshots (copies of modified files) are the largest contributor to
 
 - Use `/new` to start fresh when your current context is no longer relevant.
 - Use `/compact` proactively in long sessions to keep the context window effective.
-- Use `/rewind` to undo mistakes; it restores actual file snapshots instead of relying on the agent to reconstruct earlier state.
+- Use `/rewind` to undo mistakes; it rewinds the conversation to an earlier turn (file changes from removed turns are left as-is).
 - In headless mode, capture the `sessionId` from JSON output and pass it to `-r` to build multi-step automations that maintain context.
 - Check `/session-info` to see how much of your context window has been used.

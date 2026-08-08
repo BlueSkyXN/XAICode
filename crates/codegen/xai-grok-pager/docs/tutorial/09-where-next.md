@@ -8,7 +8,7 @@ You know enough to be productive. When you want more:
 - **`/docs`** — the full local How-to Guides inside the TUI. Covers sessions,
   headless mode, subagents, sandboxing,
   memory, and much more.
-- **Ask Xaicode itself** — it can read its local user guide and set itself up.
+- **Ask XAICode itself** — it can read its local user guide and set itself up.
   Try: "How do I run you in CI?" or "add an MCP server for GitHub".
 
 ## Good habits

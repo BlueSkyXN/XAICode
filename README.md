@@ -1,14 +1,17 @@
-# Xaicode
+# XAICode
 
 This tree is a deliberately small, local-first derivative of the upstream
 Rust terminal coding agent. It keeps the original TUI, ACP/stdio transport,
 sessions, worktrees, MCP, plugins, hooks, and workspace tools, while removing
 the hosted account and product-control paths.
 
-The source baseline is upstream Git commit `500129c714ad1b10e6095481f4a8387a2ec52649`.
-The composition-root binary is `xaicode`; `coding-agent` and the historical
-`xai-grok-pager` binary names remain as compatibility aliases in the Cargo
-package so downstream build scripts do not need to change at once.
+The source baseline is upstream Git commit `afbc0fb710320c7add294c2106d447ecc3e3af2e`
+(public crate `1.0.0`, monorepo `SOURCE_REV`
+`3e620a76a5f374ce644dc7c87f7e990c68348218`). XAICode versions this clean composition
+independently as `0.2.0`.
+The machine-readable provenance and binary policy are in [`UPSTREAM.toml`](UPSTREAM.toml).
+The composition-root binary is `xaicode`; the historical `xai-grok-pager` binary remains as
+a compatibility alias for downstream build and test tooling.
 
 ## Local provider setup
 
@@ -58,6 +61,30 @@ For ACP clients and scripts, use `xaicode agent stdio` or
 - Voice/STT capture and the standalone voice-capture subprocess.
 
 The detailed file-level change map is in [`CLEAN_BUILD.md`](CLEAN_BUILD.md).
+
+## Upstream maintenance
+
+Validate the recorded baseline, binary matrix, updater removal, and production composition
+markers without building the Rust workspace. The maintenance CLI requires Python 3.11 or newer:
+
+```sh
+python3 scripts/xaicode_maintenance.py check-contract
+```
+
+Compare the recorded baseline, the committed XAICode tree, and the pinned migration target in a
+local sibling `grok-build` checkout:
+
+```sh
+python3 scripts/xaicode_maintenance.py audit-upstream
+```
+
+The audit is read-only and uses committed Git trees. Pass `--target <commit>` to override the
+recorded candidate, `--format json` for automation, or `--list-paths` to include every path
+changed by both XAICode and upstream.
+
+The current phased migration, validation, stop, and rollback plan is in
+[`UPSTREAM_MIGRATION.md`](UPSTREAM_MIGRATION.md). Its machine-readable status and fixed target are
+recorded in `UPSTREAM.toml`.
 
 ## License
 

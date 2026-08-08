@@ -1,6 +1,6 @@
 # Getting Started
 
-Xaicode is the upstream terminal coding assistant with its hosted
+XAICode is the upstream terminal coding assistant with its hosted
 account/control-plane surfaces removed. It keeps the original TUI, ACP/stdio,
 headless mode, terminal and filesystem tools, sessions, MCP, plugins, hooks,
 worktrees, memory, and permission controls.

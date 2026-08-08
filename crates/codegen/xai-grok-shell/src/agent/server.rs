@@ -82,7 +82,7 @@ struct NewConnectionChannels {
 
 /// Query parameters for WebSocket connection.
 #[derive(Debug, serde::Deserialize, Default)]
-pub struct WsQueryParams {
+pub(crate) struct WsQueryParams {
     #[serde(rename = "server-key")]
     pub server_key: Option<String>,
 }

@@ -143,7 +143,7 @@ impl RelaySyncState {
     }
 
     /// Update the cursor after a successful sync.
-    pub fn update_cursor(&mut self, event_id: String) {
+    pub(crate) fn update_cursor(&mut self, event_id: String) {
         self.last_synced_event_id = Some(event_id);
         self.last_synced_at = Some(
             std::time::SystemTime::now()
@@ -298,7 +298,7 @@ impl RelaySync {
     }
 
     /// Get the current connection state.
-    pub fn connection_state(&self) -> ConnectionState {
+    pub(crate) fn connection_state(&self) -> ConnectionState {
         *self.connection_state_rx.borrow()
     }
 
@@ -314,7 +314,7 @@ impl RelaySync {
     }
 
     /// Subscribe to connection state changes.
-    pub fn subscribe_state(&self) -> watch::Receiver<ConnectionState> {
+    pub(crate) fn subscribe_state(&self) -> watch::Receiver<ConnectionState> {
         self.connection_state_rx.clone()
     }
 }

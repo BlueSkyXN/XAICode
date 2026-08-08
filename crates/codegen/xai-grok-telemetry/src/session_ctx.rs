@@ -5,6 +5,7 @@
 //! Extracted from `xai-grok-shell::agent::telemetry`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::Serialize;
 use serde_json::json;
@@ -183,51 +184,24 @@ pub fn emit_event<T: Serialize + Send + 'static>(event_suffix: impl Into<String>
     let _ = (event_suffix, data);
 }
 
+/// Posts spawned by [`emit_event_with_origin`] that haven't finished. Emission
+/// is fire-and-forget so it never blocks a turn, which also means a process
+/// exiting right after emitting drops the event — see [`drain_pending`].
+static PENDING_EVENTS: AtomicUsize = AtomicUsize::new(0);
+
+/// Clean-build compatibility hook. Product event emission is disabled, so
+/// there are never remote posts to drain.
+pub async fn drain_pending(timeout: std::time::Duration) {
+    let _ = timeout;
+}
+
 /// Emit an event whose analytics name is `{origin prefix}{event_suffix}`.
 pub fn emit_event_with_origin<T: Serialize + Send + 'static>(
     origin: EmitterOrigin,
     event_suffix: impl Into<String>,
     data: T,
 ) {
-    let _ = (&origin, &event_suffix, &data);
-    return;
-
-    #[allow(unreachable_code)]
-    {
-        let event_name = format!("{}{}", origin.event_prefix(), event_suffix.into());
-        let ctx_snapshot = TELEMETRY_CTX
-            .try_with(|c| {
-                (
-                    c.session_id.clone(),
-                    c.prompt_index.try_lock().map(|g| *g as u32).ok(),
-                )
-            })
-            .ok();
-
-        tokio::spawn(async move {
-            let user_ctx = UserContext::collect();
-            let request_id = format!("{}-{}", event_name, uuid::Uuid::new_v4());
-
-            let mut metadata = match serde_json::to_value(data) {
-                Ok(serde_json::Value::Object(map)) => map,
-                Ok(other) => {
-                    let mut m = Metadata::new();
-                    m.insert("value".into(), other);
-                    m
-                }
-                Err(_) => Metadata::new(),
-            };
-
-            if let Some((session_id, turn_number)) = ctx_snapshot {
-                metadata.insert("session_id".into(), json!(session_id));
-                if let Some(turn) = turn_number {
-                    metadata.insert("turn_number".into(), json!(turn));
-                }
-            }
-
-            client::track(&event_name, &request_id, &user_ctx, metadata).await;
-        });
-    }
+    let _ = (origin, event_suffix, data);
 }
 
 #[cfg(test)]
@@ -253,6 +227,26 @@ mod tests {
                 "session span must expose `{SESSION_ID_FIELD}` for debug-log routing",
             );
         });
+    }
+
+    /// Product event emission is a no-op in the clean build, including the
+    /// compatibility drain hook retained for upstream callers.
+    #[tokio::test]
+    async fn drain_pending_has_no_remote_work() {
+        emit_event_with_origin(
+            EmitterOrigin::Shell,
+            "drain_probe",
+            json!({ "probe": true }),
+        );
+        assert_eq!(PENDING_EVENTS.load(Ordering::Acquire), 0);
+
+        let started = std::time::Instant::now();
+        let budget = std::time::Duration::from_secs(5);
+        drain_pending(budget).await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "disabled telemetry drain must return immediately"
+        );
     }
 
     /// Event-name prefixes are wire contract — analytics queries match on them, so

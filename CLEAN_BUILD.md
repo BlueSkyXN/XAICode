@@ -2,7 +2,9 @@
 
 This document records the minimal-invasion changes made on top of the original
 Rust checkout. The source baseline is Git commit
-`500129c714ad1b10e6095481f4a8387a2ec52649`.
+`afbc0fb710320c7add294c2106d447ecc3e3af2e` (public crate `1.0.0`, monorepo
+`SOURCE_REV` `3e620a76a5f374ce644dc7c87f7e990c68348218`).
+The machine-readable baseline and binary policy are in [`UPSTREAM.toml`](UPSTREAM.toml).
 
 ## Composition roots and CLI
 
@@ -23,8 +25,8 @@ Rust checkout. The source baseline is Git commit
     code, logout, or hosted account switching.
   - Hides leader/login/telemetry/update controls from the public CLI.
 - `crates/codegen/xai-grok-pager-bin/Cargo.toml`
-  - Adds the `xaicode` binary name and keeps `coding-agent` plus
-    `xai-grok-pager` as compatibility aliases; removes the updater dependency.
+  - Adds the `xaicode` binary name and keeps `xai-grok-pager` as a compatibility alias;
+    removes the updater dependency.
 - `crates/codegen/xai-grok-pager/Cargo.toml`
   - Removes the updater dependency.
 - `Cargo.toml`
@@ -204,9 +206,9 @@ deny-list tests, or disabled legacy modules. They are not active provider
 endpoints, login methods, telemetry sinks, or hosted product actions in the
 clean composition roots.
 
-## Verification limitation
+## Original verification limitation
 
-The execution image does not contain `cargo`, `rustc`, or `rustfmt`, so the
-package includes static checks (`git diff --check`, source/JSON inspection) but
-not a compiled binary. Build commands above should be run in a Rust toolchain
-environment before distribution.
+The image used to create the initial clean source did not contain `cargo`, `rustc`, or
+`rustfmt`, so that import was limited to static checks. Subsequent XAICode CI and release
+workflows add focused Cargo checks, tests, and binary smoke tests; their result is separate
+evidence and must be read at the exact candidate commit.

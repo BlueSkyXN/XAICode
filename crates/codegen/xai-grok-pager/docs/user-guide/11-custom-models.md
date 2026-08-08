@@ -1,6 +1,6 @@
 # Custom Models
 
-Xaicode uses OpenAI-compatible model entries. The clean build has no
+XAICode uses OpenAI-compatible model entries. The clean build has no
 hosted model catalog; the configured local/provider endpoint is the source of
 truth.
 
@@ -50,7 +50,7 @@ export CODING_AGENT_API_KEY="$MY_CODER_KEY"
 xaicode
 ```
 
-Vendor-owned XAI/Grok hosts are rejected by the endpoint sanitizer, including
+Vendor-owned XAI/XAICode hosts are rejected by the endpoint sanitizer, including
 values supplied through stale configuration files or environment variables.
 
 ## Auxiliary model pins

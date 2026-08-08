@@ -1,0 +1,32 @@
+schema_version = 1
+
+[upstream]
+repository = "https://github.com/xai-org/grok-build.git"
+git_commit = "afbc0fb710320c7add294c2106d447ecc3e3af2e"
+source_rev = "3e620a76a5f374ce644dc7c87f7e990c68348218"
+crate_version = "1.0.0"
+
+[latest_observed]
+checked_at = "2026-08-07T17:08:15Z"
+git_commit = "afbc0fb710320c7add294c2106d447ecc3e3af2e"
+commit_time = "2026-08-07T16:56:10Z"
+source_rev = "3e620a76a5f374ce644dc7c87f7e990c68348218"
+crate_version = "1.0.0"
+npm_version = "1.0.0"
+npm_published_at = "2026-08-07T01:15:46.097Z"
+npm_git_head = "3cd0d0cbcebeb5b94a2830326ceb466d4341a5c4"
+npm_source_mapping = "version-only"
+
+[migration]
+status = "candidate"
+target_git_commit = "afbc0fb710320c7add294c2106d447ecc3e3af2e"
+product_version = "0.2.0"
+branch = "codex/upstream-1.0.0-clean"
+strategy = "ancestry-bridge"
+
+[product]
+package = "xaicode"
+version = "0.2.0"
+primary_binary = "xaicode"
+compatibility_binaries = ["xai-grok-pager"]
+forbidden_binaries = ["coding-agent", "grok"]

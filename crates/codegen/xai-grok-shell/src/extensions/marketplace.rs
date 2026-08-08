@@ -1278,7 +1278,7 @@ fn read_default_skills_installs_purged(config_path: &std::path::Path) -> bool {
 ///
 /// Gated by sticky `default_skills_installs_purged` in config.toml. Best-effort:
 /// errors are logged and never block startup.
-pub fn purge_default_skills_installs(grok_home: &std::path::Path) {
+pub(crate) fn purge_default_skills_installs(grok_home: &std::path::Path) {
     purge_default_skills_installs_impl(grok_home, || {
         xai_grok_agent::plugins::install_registry::InstallRegistry::try_load_from(
             xai_grok_agent::plugins::install_registry::InstallRegistry::resolve_install_dir(),
@@ -1378,7 +1378,7 @@ fn purge_default_skills_installs_impl(
 /// `official_marketplace_auto_installed` is set. Under a process-wide flock it
 /// adds the source (or just sets the flag if it's already present in config.toml
 /// or a JSON store). Best-effort: errors are logged and never block startup.
-pub fn ensure_official_marketplace_source(grok_home: &std::path::Path) {
+pub(crate) fn ensure_official_marketplace_source(grok_home: &std::path::Path) {
     // The upstream helper is retained only for old unit fixtures and source
     // compatibility. Production builds never auto-register a vendor source;
     // custom marketplace entries must be added explicitly by the user.

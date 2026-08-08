@@ -1,19 +1,19 @@
 //! Git operations: CLI for simple actions (stage, commit, push); git2 for structured data (status, diffs).
 #![allow(dead_code)]
+pub use crate::restore_fetch::git_object_exists;
 use anyhow::Result;
 use git2::{DiffOptions, Repository, StatusOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use url::Url;
 pub use xai_grok_workspace_types::rpc::git::{
-    ChangeType, CommitData, CommitOutcome, CommitResult, DiscardScope, GitBranchEntry,
-    GitBranchListData, GitCommitReq, GitDiffsData, GitError, GitFileChange, GitInfoData,
-    GitReadFile, GitReadFilesData, GitStatusData, GitSyncBaseOutcome, GitSyncBaseResult,
-    PushStatus, StageData, VcsKind,
+    ChangeType, CheckoutCommitResponse, CommitData, CommitOutcome, CommitResult, DiscardScope,
+    GitBranchEntry, GitBranchListData, GitCommitReq, GitDiffsData, GitError, GitFileChange,
+    GitInfoData, GitReadFile, GitReadFilesData, GitStatusData, GitSyncBaseOutcome,
+    GitSyncBaseResult, PushStatus, StageData, VcsKind,
 };
 pub const ERROR_CODE_DIFF_SIZE_EXCEEDED: &str = "DIFF_SIZE_EXCEEDED";
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,9 +55,6 @@ pub struct DiffSizeExceededFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit_lines: Option<u64>,
 }
-/// Cache for git status results to avoid redundant expensive computations.
-/// Cache is invalidated after TTL or when commit hash changes.
-pub const GIT_STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
 /// Run a git CLI command and return stdout on success, or error with stderr.
 ///
 /// All invocations use `--no-optional-locks` to prevent background stat-cache
@@ -104,6 +101,14 @@ pub async fn git_cli(cwd: &Path, args: &[&str]) -> Result<String> {
             }
         ))
     }
+}
+/// Mutating [`git_cli`]: bump the gate epoch after the attempt. Failed
+/// commands can still change the repo (`pull --rebase` conflicts, partial
+/// checkout); skipping invalidate would keep pre-mutation snapshots.
+async fn git_cli_mut(cwd: &Path, args: &[&str]) -> Result<String> {
+    let result = git_cli(cwd, args).await;
+    super::git_gate::invalidate(cwd);
+    result
 }
 /// Run a jj CLI command and return stdout on success, or error with stderr.
 ///
@@ -533,9 +538,9 @@ pub async fn checkout_branch(git_root: &Path, branch: &str, create: bool) -> Res
         );
     }
     if create {
-        git_cli(git_root, &["checkout", "-b", branch]).await?;
+        git_cli_mut(git_root, &["checkout", "-b", branch]).await?;
     } else {
-        git_cli(git_root, &["checkout", branch]).await?;
+        git_cli_mut(git_root, &["checkout", branch]).await?;
     }
     Ok(())
 }
@@ -839,9 +844,14 @@ pub async fn git_info(cwd: &Path) -> Result<GitInfoData> {
 /// Priority:
 /// 1. `refs/remotes/origin/HEAD` symbolic ref (set by `git clone` or
 ///    `git remote set-head origin --auto`).
-/// 2. `init.defaultBranch` git config value (user/system preference).
+/// 2. A unique remote-tracking `origin/main` or `origin/master`
+///    (hand-added remotes never get `origin/HEAD`).
+/// 3. `init.defaultBranch` git config value (user/system preference).
 fn detect_default_branch(repo: &Repository) -> Option<String> {
     if let Some(branch) = detect_remote_default_branch(repo) {
+        return Some(branch);
+    }
+    if let Some(branch) = guess_default_from_remote_tracking(repo) {
         return Some(branch);
     }
     if let Ok(config) = repo.config()
@@ -850,6 +860,19 @@ fn detect_default_branch(repo: &Repository) -> Option<String> {
         return Some(val);
     }
     None
+}
+/// `None` when both exist — a wrong guess would make clients treat the
+/// real default branch as a feature branch (and poll PR status on it).
+fn guess_default_from_remote_tracking(repo: &Repository) -> Option<String> {
+    let has = |name: &str| {
+        repo.find_branch(&format!("origin/{name}"), git2::BranchType::Remote)
+            .is_ok()
+    };
+    match (has("main"), has("master")) {
+        (true, false) => Some("main".to_string()),
+        (false, true) => Some("master".to_string()),
+        _ => None,
+    }
 }
 /// Resolve `refs/remotes/origin/HEAD` to the remote's default branch name.
 fn detect_remote_default_branch(repo: &Repository) -> Option<String> {
@@ -1235,6 +1258,39 @@ pub async fn status(
     ignore_submodules: bool,
     include_patches: bool,
 ) -> Result<GitStatusData> {
+    let git_root_buf = git_root.to_path_buf();
+    super::git_gate::shared()
+        .run(
+            git_root,
+            super::git_gate::FlightOp::Status {
+                include_untracked,
+                include_stats,
+                ignore_submodules,
+                include_patches,
+            },
+            move || {
+                let git_root = git_root_buf.clone();
+                async move {
+                    status_ungated(
+                        &git_root,
+                        include_untracked,
+                        include_stats,
+                        ignore_submodules,
+                        include_patches,
+                    )
+                    .await
+                }
+            },
+        )
+        .await
+}
+async fn status_ungated(
+    git_root: &Path,
+    include_untracked: bool,
+    include_stats: bool,
+    ignore_submodules: bool,
+    include_patches: bool,
+) -> Result<GitStatusData> {
     let start = std::time::Instant::now();
     let cwd = git_root.to_path_buf();
     let (branch, upstream, remote_url) =
@@ -1471,6 +1527,53 @@ pub async fn diffs(
     include_content: bool,
     merge_base: bool,
 ) -> Result<GitDiffsData> {
+    let git_root_buf = git_root.to_path_buf();
+    let paths_buf = paths.map(|p| p.to_vec());
+    let from_owned = from.to_string();
+    let to_owned = to.to_string();
+    let mut key_paths = paths_buf.clone().unwrap_or_default();
+    key_paths.sort();
+    super::git_gate::shared()
+        .run(
+            git_root,
+            super::git_gate::FlightOp::Diff {
+                from: from_owned.clone(),
+                to: to_owned.clone(),
+                merge_base,
+                include_patch,
+                include_content,
+                paths: key_paths,
+            },
+            move || {
+                let git_root = git_root_buf.clone();
+                let paths = paths_buf.clone();
+                let from = from_owned.clone();
+                let to = to_owned.clone();
+                async move {
+                    diffs_ungated(
+                        &git_root,
+                        paths.as_deref(),
+                        &from,
+                        &to,
+                        include_patch,
+                        include_content,
+                        merge_base,
+                    )
+                    .await
+                }
+            },
+        )
+        .await
+}
+async fn diffs_ungated(
+    git_root: &Path,
+    paths: Option<&[String]>,
+    from: &str,
+    to: &str,
+    include_patch: bool,
+    include_content: bool,
+    merge_base: bool,
+) -> Result<GitDiffsData> {
     let start = std::time::Instant::now();
     let cwd = git_root.to_path_buf();
     let paths = paths.map(|p| p.to_vec());
@@ -1622,11 +1725,11 @@ pub async fn stage(git_root: &Path, paths: Option<Vec<String>>) -> Result<StageD
     let start = std::time::Instant::now();
     let paths_to_stage = paths.unwrap_or_default();
     let result = if paths_to_stage.is_empty() {
-        git_cli(git_root, &["add", "-A"]).await
+        git_cli_mut(git_root, &["add", "-A"]).await
     } else {
         let mut args = vec!["add", "--"];
         args.extend(paths_to_stage.iter().map(String::as_str));
-        git_cli(git_root, &args).await
+        git_cli_mut(git_root, &args).await
     };
     tracing::debug!(paths = paths_to_stage.len(), elapsed = ?start.elapsed(), "git.stage");
     result.map(|_| StageData {
@@ -1639,9 +1742,9 @@ pub async fn unstage(git_root: &Path, paths: Option<Vec<String>>) -> Result<()> 
         Some(p) if !p.is_empty() => {
             let mut args = vec!["reset", "HEAD", "--"];
             args.extend(p.iter().map(String::as_str));
-            git_cli(git_root, &args).await
+            git_cli_mut(git_root, &args).await
         }
-        _ => git_cli(git_root, &["reset", "HEAD"]).await,
+        _ => git_cli_mut(git_root, &["reset", "HEAD"]).await,
     };
     tracing::debug!(
         paths = paths.as_ref().map(|v| v.len()).unwrap_or(0),
@@ -1669,7 +1772,7 @@ pub async fn discard(
             args.push("--");
             args.extend(&path_refs);
         }
-        git_cli(git_root, &args).await?;
+        git_cli_mut(git_root, &args).await?;
     }
     if matches!(scope, DiscardScope::Working | DiscardScope::Both) {
         let mut args = vec!["checkout"];
@@ -1679,7 +1782,7 @@ pub async fn discard(
             args.push("--");
             args.extend(&path_refs);
         }
-        let result = git_cli(git_root, &args).await;
+        let result = git_cli_mut(git_root, &args).await;
         if !include_untracked {
             result?;
         }
@@ -1690,7 +1793,7 @@ pub async fn discard(
             args.push("--");
             args.extend(&path_refs);
         }
-        git_cli(git_root, &args).await?;
+        git_cli_mut(git_root, &args).await?;
     }
     tracing::debug!(paths = path_refs.len(), elapsed = ?start.elapsed(), "git.discard");
     Ok(())
@@ -1701,7 +1804,7 @@ pub async fn stash(git_root: &Path, include_untracked: bool) -> Result<()> {
     if include_untracked {
         args.push("--include-untracked");
     }
-    git_cli(git_root, &args).await?;
+    git_cli_mut(git_root, &args).await?;
     tracing::debug!(include_untracked, elapsed = ?start.elapsed(), "git.stash");
     Ok(())
 }
@@ -1812,7 +1915,7 @@ pub async fn stash_before_destructive_op(
         session_id,
         chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
     );
-    if let Err(e) = git_cli(
+    if let Err(e) = git_cli_mut(
         git_root,
         &["stash", "push", "--include-untracked", "-m", &message],
     )
@@ -1863,6 +1966,10 @@ pub async fn stash_before_destructive_op(
 /// after this call returned, including the no-op early-return where HEAD
 /// was already at the target. Callers should rely on this flag when
 /// gating user-visible "restored" banners.
+///
+/// If a fetch is required it runs on `spawn_blocking` and is **not** cancelled
+/// when this future is dropped. The helper still kills the git process group
+/// when [`crate::restore_fetch::RESTORE_FETCH_BUDGET`] elapses.
 pub async fn checkout_session_commit(
     git_root: &Path,
     target_sha: &str,
@@ -1896,7 +2003,10 @@ pub async fn checkout_session_commit(
         stash_ref,
         stash_skipped_reason,
     };
-    if git_cli(git_root, &["checkout", target_sha]).await.is_ok() {
+    if git_cli_mut(git_root, &["checkout", target_sha])
+        .await
+        .is_ok()
+    {
         tracing::info!(
             path = %git_root.display(),
             commit = %target_sha,
@@ -1906,20 +2016,61 @@ pub async fn checkout_session_commit(
         outcome.checked_out = true;
         return outcome;
     }
-    tracing::info!(
-        path = %git_root.display(),
-        commit = %target_sha,
-        "checkout_session_commit: local checkout failed, fetching from origin"
-    );
-    if git_cli(git_root, &["fetch", "origin"]).await.is_err() {
+    if !crate::restore_fetch::is_full_object_id(target_sha) {
         tracing::warn!(
             path = %git_root.display(),
             commit = %target_sha,
-            "checkout_session_commit: fetch failed, giving up"
+            "checkout_session_commit: refusing non-oid fetch refspec, giving up"
         );
         return outcome;
     }
-    if git_cli(git_root, &["checkout", target_sha]).await.is_ok() {
+    if git_cli(git_root, &["cat-file", "-t", target_sha])
+        .await
+        .is_ok()
+    {
+        tracing::warn!(
+            path = %git_root.display(),
+            commit = %target_sha,
+            "checkout_session_commit: checkout failed with object already local; not fetching"
+        );
+        return outcome;
+    }
+    tracing::info!(
+        path = %git_root.display(),
+        commit = %target_sha,
+        "checkout_session_commit: fetching missing session HEAD from origin"
+    );
+    match fetch_missing_commit(git_root, target_sha).await {
+        AsyncFetchOutcome::Completed(Ok(fetch_outcome)) => {
+            tracing::info!(
+                path = %git_root.display(),
+                commit = %target_sha,
+                ?fetch_outcome,
+                "checkout_session_commit: targeted fetch finished"
+            );
+        }
+        AsyncFetchOutcome::Completed(Err(e)) => {
+            tracing::warn!(
+                path = %git_root.display(),
+                commit = %target_sha,
+                error = %e,
+                "checkout_session_commit: fetch failed, giving up"
+            );
+            return outcome;
+        }
+        AsyncFetchOutcome::Abandoned => {
+            tracing::warn!(
+                path = %git_root.display(),
+                commit = %target_sha,
+                "checkout_session_commit: fetch join timed out; not checking out while fetch may still run"
+            );
+            return outcome;
+        }
+    }
+    if git_cli_mut(git_root, &["checkout", target_sha])
+        .await
+        .is_ok()
+    {
         tracing::info!(
             path = %git_root.display(),
             commit = %target_sha,
@@ -1936,11 +2087,172 @@ pub async fn checkout_session_commit(
     );
     outcome
 }
+#[derive(Debug)]
+pub(crate) enum AsyncFetchOutcome {
+    Completed(anyhow::Result<crate::restore_fetch::FetchCommitOutcome>),
+    Abandoned,
+}
+pub(crate) async fn fetch_missing_commit(git_root: &Path, oid: &str) -> AsyncFetchOutcome {
+    spawn_targeted_fetch(git_root, oid, FetchKind::CommitOidOnly).await
+}
+pub(crate) async fn fetch_checkout_target(git_root: &Path, target: &str) -> AsyncFetchOutcome {
+    spawn_targeted_fetch(git_root, target, FetchKind::CheckoutRef).await
+}
+#[derive(Clone, Copy)]
+enum FetchKind {
+    CommitOidOnly,
+    CheckoutRef,
+}
+async fn spawn_targeted_fetch(git_root: &Path, spec: &str, kind: FetchKind) -> AsyncFetchOutcome {
+    let fetch_root = git_root.to_path_buf();
+    let fetch_spec = spec.to_owned();
+    match tokio::time::timeout(
+        crate::restore_fetch::RESTORE_FETCH_BUDGET + crate::restore_fetch::RESTORE_FETCH_JOIN_SLACK,
+        tokio::task::spawn_blocking(move || match kind {
+            FetchKind::CheckoutRef => {
+                crate::restore_fetch::fetch_checkout_target_if_missing(&fetch_root, &fetch_spec)
+            }
+            FetchKind::CommitOidOnly => {
+                crate::restore_fetch::fetch_commit_if_missing(&fetch_root, &fetch_spec)
+            }
+        }),
+    )
+    .await
+    {
+        Err(_) => AsyncFetchOutcome::Abandoned,
+        Ok(Err(e)) => {
+            AsyncFetchOutcome::Completed(Err(anyhow::anyhow!("targeted fetch task failed: {e}")))
+        }
+        Ok(Ok(result)) => AsyncFetchOutcome::Completed(result),
+    }
+}
+/// Checkout `head_commit` (full oid or simple ref), fetching from origin if needed.
+pub(crate) async fn checkout_commit_with_fetch(
+    git_root: &Path,
+    head_commit: &str,
+    stash_if_dirty: bool,
+) -> CheckoutCommitResponse {
+    if let Some(current) = get_current_commit(git_root).await
+        && current == head_commit
+    {
+        return CheckoutCommitResponse {
+            checked_out: true,
+            stashed: false,
+            fetched: false,
+            error: None,
+        };
+    }
+    let mut stashed = false;
+    if stash_if_dirty {
+        let status = git_cli(git_root, &["status", "--porcelain"]).await;
+        if let Ok(output) = &status
+            && !output.trim().is_empty()
+        {
+            let msg = format!("auto-stash before checkout {head_commit}");
+            if git_cli_mut(git_root, &["stash", "push", "-m", &msg])
+                .await
+                .is_ok()
+            {
+                stashed = true;
+            }
+        }
+    }
+    if git_cli_mut(git_root, &["checkout", head_commit])
+        .await
+        .is_ok()
+    {
+        return CheckoutCommitResponse {
+            checked_out: true,
+            stashed,
+            fetched: false,
+            error: None,
+        };
+    }
+    let fetched = match fetch_checkout_target(git_root, head_commit).await {
+        AsyncFetchOutcome::Completed(Ok(crate::restore_fetch::FetchCommitOutcome::Fetched)) => {
+            tracing::info!(
+                path = %git_root.display(),
+                target = %head_commit,
+                "checkout_commit_with_fetch: fetched target"
+            );
+            true
+        }
+        AsyncFetchOutcome::Completed(Ok(
+            crate::restore_fetch::FetchCommitOutcome::AlreadyPresent,
+        )) => false,
+        AsyncFetchOutcome::Completed(Ok(
+            crate::restore_fetch::FetchCommitOutcome::SkippedInvalidOid,
+        )) => {
+            return pop_checkout_auto_stash(
+                git_root,
+                stashed,
+                false,
+                format!("unsupported checkout target: {head_commit}"),
+            )
+            .await;
+        }
+        AsyncFetchOutcome::Completed(Err(e)) => {
+            tracing::warn!(
+                path = %git_root.display(),
+                target = %head_commit,
+                error = %e,
+                "checkout_commit_with_fetch: fetch failed"
+            );
+            if !crate::restore_fetch::is_safe_fetch_refspec(head_commit) {
+                return pop_checkout_auto_stash(git_root, stashed, false, e.to_string()).await;
+            }
+            false
+        }
+        AsyncFetchOutcome::Abandoned => {
+            tracing::warn!(
+                path = %git_root.display(),
+                target = %head_commit,
+                "checkout_commit_with_fetch: fetch join timed out; not checking out"
+            );
+            return pop_checkout_auto_stash(
+                git_root,
+                stashed,
+                false,
+                "targeted fetch timed out".to_owned(),
+            )
+            .await;
+        }
+    };
+    match git_cli_mut(git_root, &["checkout", head_commit]).await {
+        Ok(_) => CheckoutCommitResponse {
+            checked_out: true,
+            stashed,
+            fetched,
+            error: None,
+        },
+        Err(e) => pop_checkout_auto_stash(git_root, stashed, fetched, e.to_string()).await,
+    }
+}
+/// Restore a pre-checkout auto-stash on failure so callers that only inspect
+/// `error` are not left on a clean tree with a hidden stash entry.
+async fn pop_checkout_auto_stash(
+    git_root: &Path,
+    stashed: bool,
+    fetched: bool,
+    error: String,
+) -> CheckoutCommitResponse {
+    if stashed {
+        let _ = git_cli_mut(git_root, &["stash", "pop"]).await;
+    }
+    CheckoutCommitResponse {
+        checked_out: false,
+        stashed: false,
+        fetched,
+        error: Some(error),
+    }
+}
 /// Decide whether a `--restore-code` HEAD checkout is safe to run against
 /// `supplied_cwd`.
 ///
-/// The restore-code path runs `git fetch origin` + `git checkout <sha>`,
-/// which *detaches HEAD*. That is only acceptable in two situations:
+/// The restore-code path may run a targeted
+/// `git fetch --no-tags [--depth=1] origin <sha>` + `git checkout <sha>`,
+/// which *detaches HEAD*. `--depth=1` is only added when the repo is already
+/// shallow. That is only acceptable in two situations:
 ///
 /// 1. `supplied_cwd` is a grok-managed worktree (`~/.grok/worktrees/...`).
 ///    These are disposable snapshots that exist precisely to carry a
@@ -2167,7 +2479,7 @@ pub async fn soft_restore_git_state(
             };
         }
     };
-    if let Err(e) = git_cli(&git_root, &["reset", "--soft", &git_ref.head]).await {
+    if let Err(e) = git_cli_mut(&git_root, &["reset", "--soft", &git_ref.head]).await {
         tracing::warn!(
             path = %git_root.display(),
             session_id,
@@ -2176,7 +2488,7 @@ pub async fn soft_restore_git_state(
             "soft_restore_git_state: reset --soft failed"
         );
         let stash_ref = match stash_ref {
-            Some(stash) => match git_cli(&git_root, &["stash", "pop"]).await {
+            Some(stash) => match git_cli_mut(&git_root, &["stash", "pop"]).await {
                 Ok(_) => None,
                 Err(pop_err) => {
                     tracing::warn!(
@@ -2199,7 +2511,7 @@ pub async fn soft_restore_git_state(
             stash_ref,
         };
     }
-    let index_reset = match git_cli(&git_root, &["reset", "--quiet", "--", "."]).await {
+    let index_reset = match git_cli_mut(&git_root, &["reset", "--quiet", "--", "."]).await {
         Ok(_) => true,
         Err(e) => {
             tracing::warn!(
@@ -2252,7 +2564,7 @@ pub async fn restage_git_paths(cwd: &Path, git_ref: &GitStateRef, session_id: &s
     let mut batch_args: Vec<&str> = Vec::with_capacity(path_strs.len() + 2);
     batch_args.extend(["add", "--"]);
     batch_args.extend(path_strs.iter().map(String::as_str));
-    if git_cli(&git_root, &batch_args).await.is_ok() {
+    if git_cli_mut(&git_root, &batch_args).await.is_ok() {
         return true;
     }
     tracing::debug!(
@@ -2264,7 +2576,7 @@ pub async fn restage_git_paths(cwd: &Path, git_ref: &GitStateRef, session_id: &s
     let mut failed_adds = 0usize;
     for path in &git_ref.staged {
         let path_str = path.to_string_lossy();
-        if git_cli(&git_root, &["add", "--", path_str.as_ref()])
+        if git_cli_mut(&git_root, &["add", "--", path_str.as_ref()])
             .await
             .is_err()
         {
@@ -2308,6 +2620,13 @@ async fn git_cli_raw(cwd: &Path, args: &[&str]) -> Result<(bool, String)> {
         combined.push_str(&stderr);
     }
     Ok((output.status.success(), combined))
+}
+async fn git_cli_raw_mut(cwd: &Path, args: &[&str]) -> Result<(bool, String)> {
+    let result = git_cli_raw(cwd, args).await;
+    if result.is_ok() {
+        super::git_gate::invalidate(cwd);
+    }
+    result
 }
 /// Marker line guarding the default-exclude seed. Environments may pre-seed
 /// the same block at provision time under this marker; whichever side seeds
@@ -2377,7 +2696,7 @@ async fn seed_default_excludes(git_root: &Path) -> Result<()> {
 /// Push HEAD to origin, classifying the failure mode. Never forces. Returns
 /// the combined output alongside the [`PushStatus`].
 async fn push_classified(git_root: &Path) -> Result<(PushStatus, String)> {
-    let (ok, out) = git_cli_raw(git_root, &["push", "-u", "origin", "HEAD"]).await?;
+    let (ok, out) = git_cli_raw_mut(git_root, &["push", "-u", "origin", "HEAD"]).await?;
     if ok {
         return Ok((PushStatus::Ok, out));
     }
@@ -2409,7 +2728,7 @@ pub async fn commit(git_root: &Path, req: &GitCommitReq) -> Result<CommitResult>
         seed_default_excludes(git_root).await?;
     }
     if req.stage_all {
-        git_cli(git_root, &["add", "-A"]).await?;
+        git_cli_mut(git_root, &["add", "-A"]).await?;
     }
     let clean = req.stage_all
         && !req.amend
@@ -2427,7 +2746,7 @@ pub async fn commit(git_root: &Path, req: &GitCommitReq) -> Result<CommitResult>
         if req.signoff {
             args.push("--signoff");
         }
-        git_cli(git_root, &args).await?;
+        git_cli_mut(git_root, &args).await?;
         combined_output = String::new();
     }
     let mut commit_hash = git_cli(git_root, &["rev-parse", "HEAD"]).await.ok();
@@ -2441,7 +2760,7 @@ pub async fn commit(git_root: &Path, req: &GitCommitReq) -> Result<CommitResult>
     let mut warning = None;
     let mut push_status = PushStatus::NotRequested;
     if req.sync {
-        match git_cli(git_root, &["pull", "--rebase"]).await {
+        match git_cli_mut(git_root, &["pull", "--rebase"]).await {
             Ok(pull_out) => {
                 combined_output.push_str("\n--- Pull ---\n");
                 combined_output.push_str(&pull_out);
@@ -2508,7 +2827,7 @@ pub async fn sync_base(
         )
     }
     if abort {
-        let (_ok, out) = git_cli_raw(git_root, &["merge", "--abort"]).await?;
+        let (_ok, out) = git_cli_raw_mut(git_root, &["merge", "--abort"]).await?;
         anyhow::ensure!(
             !merge_in_progress(git_root).await?,
             "merge --abort failed: {out}"
@@ -2528,7 +2847,7 @@ pub async fn sync_base(
         "working tree is not clean; commit or discard changes before syncing the base"
     );
     let base = base_ref.unwrap_or("HEAD");
-    let (fetched, fetch_out) = git_cli_raw(git_root, &["fetch", "origin", base]).await?;
+    let (fetched, fetch_out) = git_cli_raw_mut(git_root, &["fetch", "origin", base]).await?;
     anyhow::ensure!(fetched, "fetch of base ref '{base}' failed: {fetch_out}");
     if git_cli_raw(
         git_root,
@@ -2541,7 +2860,8 @@ pub async fn sync_base(
             outcome: GitSyncBaseOutcome::UpToDate,
         });
     }
-    let (merged, merge_out) = git_cli_raw(git_root, &["merge", "--no-edit", "FETCH_HEAD"]).await?;
+    let (merged, merge_out) =
+        git_cli_raw_mut(git_root, &["merge", "--no-edit", "FETCH_HEAD"]).await?;
     if merged {
         let sha = git_cli(git_root, &["rev-parse", "HEAD"]).await?;
         return Ok(GitSyncBaseResult {
@@ -2561,10 +2881,11 @@ pub async fn sync_base(
     anyhow::bail!("merge of base ref '{base}' failed: {merge_out}")
 }
 pub async fn stage_content(git_root: &Path, path: &str, content: &str) -> Result<()> {
-    let git_root = git_root.to_path_buf();
+    let git_root_buf = git_root.to_path_buf();
     let path = path.to_string();
     let content = content.to_string();
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let git_root = git_root_buf;
         let repo = Repository::open(&git_root)?;
         let work_dir = repo
             .workdir()
@@ -2608,7 +2929,9 @@ pub async fn stage_content(git_root: &Path, path: &str, content: &str) -> Result
         index.write()?;
         Ok(())
     })
-    .await?
+    .await??;
+    super::git_gate::invalidate(git_root);
+    Ok(())
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2780,6 +3103,28 @@ mod tests {
             strip_url_credentials(url_with_creds),
             "https://github.com/xai-org/example.git"
         );
+    }
+    #[test]
+    fn detect_default_branch_falls_back_to_unique_remote_tracking_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(tmp.path()).unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("init.defaultBranch", "trunk")
+            .unwrap();
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+        assert_eq!(detect_default_branch(&repo).as_deref(), Some("trunk"));
+        repo.reference("refs/remotes/origin/main", oid, false, "test")
+            .unwrap();
+        assert_eq!(detect_default_branch(&repo).as_deref(), Some("main"));
+        repo.reference("refs/remotes/origin/master", oid, false, "test")
+            .unwrap();
+        assert_eq!(detect_default_branch(&repo).as_deref(), Some("trunk"));
     }
     #[test]
     fn test_resolve_persisted_session_git_metadata_collects_sorted_unique_remotes() {
@@ -3974,6 +4319,306 @@ mod restore_code_tests {
         let bogus = "0000000000000000000000000000000000000000";
         let outcome = checkout_session_commit(tmp.path(), bogus, true, "sess-bogus").await;
         assert!(!outcome.checked_out);
+    }
+    #[tokio::test]
+    async fn checkout_session_commit_refuses_non_oid_refspec() {
+        if bazel_skip("checkout_session_commit_refuses_non_oid_refspec") {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_commit(tmp.path()).await;
+        for bogus in ["origin/main", "abc1234"] {
+            let outcome = checkout_session_commit(tmp.path(), bogus, true, "sess-ref").await;
+            assert!(!outcome.checked_out, "{bogus}");
+            assert!(
+                !tmp.path().join(".git/FETCH_HEAD").exists(),
+                "must not fetch for non-oid {bogus}"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn checkout_session_commit_fetches_then_checks_out() {
+        if bazel_skip("checkout_session_commit_fetches_then_checks_out") {
+            return;
+        }
+        let upstream = tempfile::tempdir().unwrap();
+        init_repo_with_commit(upstream.path()).await;
+        let dest_root = tempfile::tempdir().unwrap();
+        let repo = dest_root.path().join("repo");
+        git_cli(
+            dest_root.path(),
+            &[
+                "clone",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &repo.to_string_lossy(),
+            ],
+        )
+        .await
+        .unwrap();
+        std::fs::write(upstream.path().join("two.txt"), "two\n").unwrap();
+        git_cli(upstream.path(), &["add", "."]).await.unwrap();
+        git_cli(upstream.path(), &["commit", "-q", "-m", "two"])
+            .await
+            .unwrap();
+        let second = git_cli(upstream.path(), &["rev-parse", "HEAD"])
+            .await
+            .unwrap();
+        let second = second.trim().to_owned();
+        let outcome = checkout_session_commit(&repo, &second, true, "sess-fetch").await;
+        assert!(outcome.checked_out, "expected checkout after fetch");
+        let on_head = git_cli(&repo, &["rev-parse", "HEAD"]).await.unwrap();
+        assert_eq!(on_head.trim(), second);
+        assert_eq!(
+            git_cli(&repo, &["rev-parse", "--is-shallow-repository"])
+                .await
+                .unwrap()
+                .trim(),
+            "false"
+        );
+    }
+    #[tokio::test]
+    async fn checkout_commit_with_fetch_already_on_target() {
+        if bazel_skip("checkout_commit_with_fetch_already_on_target") {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let head = init_repo_with_commit(tmp.path()).await;
+        let response = checkout_commit_with_fetch(tmp.path(), &head, false).await;
+        assert_eq!(
+            (
+                response.checked_out,
+                response.fetched,
+                response.stashed,
+                response.error.is_none()
+            ),
+            (true, false, false, true)
+        );
+    }
+    #[tokio::test]
+    async fn checkout_commit_with_fetch_rejects_unsafe_refspec() {
+        if bazel_skip("checkout_commit_with_fetch_rejects_unsafe_refspec") {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_commit(tmp.path()).await;
+        let response = checkout_commit_with_fetch(tmp.path(), "foo:bar", false).await;
+        assert!(!response.checked_out);
+        assert!(!response.fetched);
+        let err = response.error.expect("error");
+        assert!(
+            err.contains("unsupported") || err.contains("refusing"),
+            "got: {err}"
+        );
+        assert!(!tmp.path().join(".git/FETCH_HEAD").exists());
+    }
+    #[tokio::test]
+    async fn checkout_commit_with_fetch_fetches_branch_ref() {
+        if bazel_skip("checkout_commit_with_fetch_fetches_branch_ref") {
+            return;
+        }
+        let upstream = tempfile::tempdir().unwrap();
+        init_repo_with_commit(upstream.path()).await;
+        let dest_root = tempfile::tempdir().unwrap();
+        let repo = dest_root.path().join("repo");
+        git_cli(
+            dest_root.path(),
+            &[
+                "clone",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &repo.to_string_lossy(),
+            ],
+        )
+        .await
+        .unwrap();
+        git_cli(upstream.path(), &["checkout", "-q", "-b", "feature"])
+            .await
+            .unwrap();
+        std::fs::write(upstream.path().join("two.txt"), "two\n").unwrap();
+        git_cli(upstream.path(), &["add", "."]).await.unwrap();
+        git_cli(upstream.path(), &["commit", "-q", "-m", "two"])
+            .await
+            .unwrap();
+        let second = git_cli(upstream.path(), &["rev-parse", "HEAD"])
+            .await
+            .unwrap();
+        let second = second.trim().to_owned();
+        let response = checkout_commit_with_fetch(&repo, "feature", false).await;
+        assert!(response.fetched, "error={:?}", response.error);
+        assert!(response.checked_out, "error={:?}", response.error);
+        let on_head = git_cli(&repo, &["rev-parse", "HEAD"]).await.unwrap();
+        assert_eq!(on_head.trim(), second);
+    }
+    #[tokio::test]
+    async fn checkout_commit_with_fetch_fetches_origin_tracking_ref() {
+        if bazel_skip("checkout_commit_with_fetch_fetches_origin_tracking_ref") {
+            return;
+        }
+        let upstream = tempfile::tempdir().unwrap();
+        init_repo_with_commit(upstream.path()).await;
+        let dest_root = tempfile::tempdir().unwrap();
+        let repo = dest_root.path().join("repo");
+        git_cli(
+            dest_root.path(),
+            &[
+                "clone",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &repo.to_string_lossy(),
+            ],
+        )
+        .await
+        .unwrap();
+        git_cli(upstream.path(), &["checkout", "-q", "-b", "feature"])
+            .await
+            .unwrap();
+        std::fs::write(upstream.path().join("two.txt"), "two\n").unwrap();
+        git_cli(upstream.path(), &["add", "."]).await.unwrap();
+        git_cli(upstream.path(), &["commit", "-q", "-m", "two"])
+            .await
+            .unwrap();
+        let second = git_cli(upstream.path(), &["rev-parse", "HEAD"])
+            .await
+            .unwrap();
+        let second = second.trim().to_owned();
+        let response = checkout_commit_with_fetch(&repo, "origin/feature", false).await;
+        assert!(response.fetched, "error={:?}", response.error);
+        assert!(response.checked_out, "error={:?}", response.error);
+        let on_head = git_cli(&repo, &["rev-parse", "HEAD"]).await.unwrap();
+        assert_eq!(on_head.trim(), second);
+    }
+    #[tokio::test]
+    async fn checkout_commit_with_fetch_fetches_tag_ref() {
+        if bazel_skip("checkout_commit_with_fetch_fetches_tag_ref") {
+            return;
+        }
+        let upstream = tempfile::tempdir().unwrap();
+        init_repo_with_commit(upstream.path()).await;
+        git_cli(upstream.path(), &["tag", "v1.0.0"]).await.unwrap();
+        let tagged = git_cli(upstream.path(), &["rev-parse", "refs/tags/v1.0.0"])
+            .await
+            .unwrap();
+        let tagged = tagged.trim().to_owned();
+        git_cli(upstream.path(), &["checkout", "-q", "-b", "dev"])
+            .await
+            .unwrap();
+        std::fs::write(upstream.path().join("two.txt"), "two\n").unwrap();
+        git_cli(upstream.path(), &["add", "."]).await.unwrap();
+        git_cli(upstream.path(), &["commit", "-q", "-m", "two"])
+            .await
+            .unwrap();
+        let dest_root = tempfile::tempdir().unwrap();
+        let repo = dest_root.path().join("repo");
+        git_cli(
+            dest_root.path(),
+            &[
+                "clone",
+                "-q",
+                "--no-tags",
+                &upstream.path().to_string_lossy(),
+                &repo.to_string_lossy(),
+            ],
+        )
+        .await
+        .unwrap();
+        assert!(
+            git_cli(&repo, &["rev-parse", "refs/tags/v1.0.0"])
+                .await
+                .is_err()
+        );
+        let response = checkout_commit_with_fetch(&repo, "refs/tags/v1.0.0", false).await;
+        assert!(response.fetched, "error={:?}", response.error);
+        assert!(response.checked_out, "error={:?}", response.error);
+        let on_head = git_cli(&repo, &["rev-parse", "HEAD"]).await.unwrap();
+        assert_eq!(on_head.trim(), tagged);
+        let local_tag = git_cli(&repo, &["rev-parse", "refs/tags/v1.0.0"])
+            .await
+            .unwrap();
+        assert_eq!(local_tag.trim(), tagged);
+    }
+    #[tokio::test]
+    async fn checkout_commit_with_fetch_rejects_abbreviated_sha() {
+        if bazel_skip("checkout_commit_with_fetch_rejects_abbreviated_sha") {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_commit(tmp.path()).await;
+        let response = checkout_commit_with_fetch(tmp.path(), "abc1234f", false).await;
+        assert!(!response.checked_out);
+        assert!(!response.fetched);
+        let err = response.error.expect("error");
+        assert!(
+            err.contains("unsupported") || err.contains("refusing"),
+            "got: {err}"
+        );
+        assert!(!tmp.path().join(".git/FETCH_HEAD").exists());
+    }
+    #[tokio::test]
+    async fn checkout_commit_with_fetch_pops_stash_on_unsupported_target() {
+        if bazel_skip("checkout_commit_with_fetch_pops_stash_on_unsupported_target") {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_commit(tmp.path()).await;
+        std::fs::write(tmp.path().join("README.md"), "dirty edit\n").unwrap();
+        let response = checkout_commit_with_fetch(tmp.path(), "deadbeef", true).await;
+        assert!(!response.checked_out);
+        assert!(!response.stashed, "auto-stash must be popped on failure");
+        assert!(response.error.is_some());
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("README.md")).unwrap(),
+            "dirty edit\n"
+        );
+        let stash_list = git_cli(tmp.path(), &["stash", "list"]).await.unwrap();
+        assert!(
+            stash_list.trim().is_empty(),
+            "no leftover stash, got: {stash_list:?}"
+        );
+    }
+    #[tokio::test]
+    async fn pop_checkout_auto_stash_restores_dirty_tree() {
+        if bazel_skip("pop_checkout_auto_stash_restores_dirty_tree") {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_commit(tmp.path()).await;
+        std::fs::write(tmp.path().join("README.md"), "dirty edit\n").unwrap();
+        git_cli(
+            tmp.path(),
+            &["stash", "push", "-m", "auto-stash before checkout deadbeef"],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("README.md")).unwrap(),
+            "hello\n"
+        );
+        let response = pop_checkout_auto_stash(
+            tmp.path(),
+            true,
+            false,
+            "targeted fetch timed out".to_owned(),
+        )
+        .await;
+        assert_eq!(
+            (
+                response.checked_out,
+                response.fetched,
+                response.stashed,
+                response.error.as_deref()
+            ),
+            (false, false, false, Some("targeted fetch timed out"))
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("README.md")).unwrap(),
+            "dirty edit\n"
+        );
+        let stash_list = git_cli(tmp.path(), &["stash", "list"]).await.unwrap();
+        assert!(
+            stash_list.trim().is_empty(),
+            "no leftover stash, got: {stash_list:?}"
+        );
     }
     #[tokio::test]
     async fn checkout_session_commit_dirty_during_merge_surfaces_skipped_reason() {

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -88,9 +90,12 @@ pub enum RefreshTokenFailedReason {
     RefreshTokenRejected,
     /// `invalid_client` — the client/app credential was rejected.
     ClientRejected,
-    /// Escalation from repeated transient failures (OIDC) or a single
-    /// external-binary failure. Never a raw IdP code: an unrecognized terminal
-    /// code is classified transient, not `Other` (see `classify_terminal`).
+    /// The operator's `auth_provider_command` could not mint a credential in a
+    /// headless run (`GROK_AUTH_EXPIRED=1`).
+    ProviderInteractiveRequired,
+    /// Escalation from repeated transient failures (OIDC). Never a raw IdP
+    /// code: an unrecognized terminal code is classified transient, not
+    /// `Other` (see `classify_terminal`).
     Other,
 }
 
@@ -101,24 +106,52 @@ impl RefreshTokenFailedReason {
     pub(crate) fn is_sticky(self) -> bool {
         match self {
             Self::RefreshTokenRejected => true,
+            Self::ClientRejected | Self::ProviderInteractiveRequired | Self::Other => false,
+        }
+    }
+
+    /// Whether the verdict rules out an unattended retry for as long as it
+    /// stands. Orthogonal to [`Self::is_sticky`], which is about whether the
+    /// verdict ever ages out.
+    pub(crate) fn blocks_unattended_retry(self) -> bool {
+        match self {
+            Self::RefreshTokenRejected | Self::ProviderInteractiveRequired => true,
             Self::ClientRejected | Self::Other => false,
         }
     }
 
     /// User-facing copy for a terminal refresh failure; the raw IdP code stays
     /// in logs.
-    pub(crate) fn user_message(self) -> &'static str {
+    pub(crate) fn user_message(self) -> Cow<'static, str> {
         match self {
             Self::RefreshTokenRejected => {
-                "The provider session is unavailable. Configure a local provider API key."
+                "The provider session is unavailable. Configure a local provider API key.".into()
             }
             Self::ClientRejected => {
                 "Provider authentication is temporarily unavailable. Check your local API key."
+                    .into()
+            }
+            Self::ProviderInteractiveRequired => {
+                "Interactive provider authentication is disabled; configure a local API key.".into()
             }
             Self::Other => {
-                "Provider authentication could not be refreshed. Check your local API key."
+                "Provider authentication could not be refreshed. Check your local API key.".into()
             }
         }
+    }
+}
+
+/// `label` is the operator's `auth_provider_label`, where the surface has one.
+pub(crate) fn provider_login_message(label: Option<&str>) -> Cow<'static, str> {
+    match label {
+        Some(label) => format!(
+            "Your session expired and {label} could not renew it in the background. \
+             Run /login to sign in again."
+        )
+        .into(),
+        None => "Your session expired and your sign-in helper could not renew it in the \
+                 background. Run /login to sign in again."
+            .into(),
     }
 }
 

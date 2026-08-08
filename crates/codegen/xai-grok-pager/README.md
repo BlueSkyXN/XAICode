@@ -1,9 +1,10 @@
-# Xaicode TUI
+# XAICode TUI
 
-Terminal UI (TUI) for the clean local Xaicode. This crate retains the
+Terminal UI (TUI) for the clean local XAICode. This crate retains the
 upstream package name and module layout, while the supported composition-root
-binary is `xaicode` (`coding-agent` and `xai-grok-pager` remain compatibility
-aliases). It provides the interactive full-screen interface
+binary is `xaicode`; `xai-grok-pager` is the only compatibility alias.
+No other product binary aliases are declared. The crate provides the interactive full-screen
+interface
 including the scrollback view, prompt input, session management, and all modal
 dialogs.
 

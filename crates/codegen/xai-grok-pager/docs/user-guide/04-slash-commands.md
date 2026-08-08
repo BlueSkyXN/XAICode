@@ -4,9 +4,12 @@ Type `/` in the prompt to open the command menu. It fuzzy-matches as you type, a
 
 Commands come from two places: **shell builtins**, handled by the agent backend,
 and **pager builtins**, handled by the TUI frontend. Both show up in the same
-menu, and any enabled skill with `user-invocable: true` appears there too.
+menu, and any enabled skill with `user-invocable: true` appears there too. If a
+skill reuses a built-in name, the built-in keeps the bare command and the skill
+stays available under its qualified plugin or scope name, so the collision is
+visible in the menu.
 
-Every command below lists its aliases where it has them. A few commands only appear when a feature or session state enables them; those cases are called out inline.
+Every command below lists its aliases where it has them. A few commands only appear when a feature or session state enables them; those cases are called out inline. The menu is also filtered by render mode — see [`/minimal` and `/fullscreen`](#minimal-and-fullscreen).
 
 ---
 
@@ -28,14 +31,14 @@ Not `/config-agents` (alias `/agents`), which manages agent *definitions* and pe
 
 ### `/compact [context]`
 
-Compress conversation history to reclaim context-window space. Pass a note to tell Grok what to keep:
+Compress conversation history to reclaim context-window space. Pass a note to tell XAICode what to keep:
 
 ```
 /compact
 /compact keep the auth implementation details
 ```
 
-Grok also auto-compacts once the context window hits 85% (tune it with `[session] auto_compact_threshold_percent`).
+XAICode also auto-compacts once the context window hits 85% (tune it with `[session] auto_compact_threshold_percent`).
 
 ### `/context`
 
@@ -49,13 +52,13 @@ Show session details — auth method, model, turn count, and context usage. Alia
 
 Branch the current session into a new agent, keeping history up to this point.
 
-### `/rewind`
+### `/rewind` (alias: `/undo`)
 
-Roll the conversation back to an earlier turn and discard everything after it.
+Roll the conversation back to an earlier turn and discard everything after it. `/undo` is the same command.
 
 ### `/edit-prompt`
 
-In minimal mode, open an external editor for an empty composer. Grok resolves `$VISUAL`, then `$EDITOR`, then `vi`; command values may include quoted arguments. Saving replaces the draft without sending it, and saving an empty file clears it. The command is hidden outside minimal mode.
+In minimal mode, open an external editor for an empty composer. XAICode resolves `$VISUAL`, then `$EDITOR`, then `vi`; command values may include quoted arguments. Saving replaces the draft without sending it, and saving an empty file clears it. The command is hidden outside minimal mode.
 
 ```
 /edit-prompt
@@ -90,9 +93,9 @@ Leave the current session and return to the welcome screen. Alias: `/welcome`.
 
 ### `/delete`
 
-Delete the current session's history and return to the welcome screen. Confirms first.
+Delete the current session's history. Confirms first. Returns to the welcome screen, or to the dashboard when you opened the session from the dashboard.
 
-To delete a session you are not in, open `/resume` and press `d` then `y`.
+To delete a session you are not in, open `/resume` or the welcome session list and press `d` then `y`. On the dashboard, press `Ctrl+X` twice or click `[✗]`.
 
 ### `/rename`
 
@@ -154,7 +157,9 @@ Toggle vim-style scrollback keys (`j`/`k`, `h`/`l`, `g`/`G`, `y`/`Y`, and so on)
 
 ### `/minimal` and `/fullscreen`
 
-Reopen the current session in the other render mode. `/minimal` (offered while you're in fullscreen) switches to the experimental scrollback-native mode; `/fullscreen` (offered while you're in minimal; alias `/full`) switches back to the standard alt-screen TUI. Both relaunch the pager on the same conversation for this session only — they don't touch `config.toml`, and the relaunch banner reminds you how to switch back. The `--minimal` / `--fullscreen` CLI flags are session-scoped the same way. To make plain `grok` open in a given mode by default, use `/settings` → **Default screen mode** or set `[ui] screen_mode`.
+Reopen the current session in the other render mode. `/minimal` (offered while you're in fullscreen) switches to the experimental scrollback-native mode; `/fullscreen` (offered while you're in minimal; alias `/full`) switches back to standard fullscreen mode. Both relaunch the pager on the same conversation for this session only — they don't touch `config.toml`, and the relaunch banner reminds you how to switch back. The `--minimal` / `--fullscreen` CLI flags are session-scoped the same way. To make plain `xaicode` open in a given mode by default, use `/settings` → **Default screen mode** or set `[ui] screen_mode`.
+
+A handful of commands only work in one of the two modes, because the surface they drive doesn't exist in the other: `/find`, `/jump`, `/timeline`, `/theme`, `/tutorial`, `/workflows`, and `/dashboard` are fullscreen-only, while `/expand` and `/edit-prompt` are minimal-only. Those are hidden from the command menu and the palette in the mode they can't run in. If you type one out anyway, XAICode says why — and points you at whichever is actually useful. When the other mode is the only way to get it, that's the mode switch: `/theme isn't available in minimal mode (minimal renders with your terminal's own palette). Run /fullscreen to switch this session.` When this mode already does the job another way, it names that instead: `/expand isn't available in fullscreen mode — press Tab to focus the scrollback, then → on the block.` Everything else works in both. Note that `--no-alt-screen` still counts as fullscreen here, so it keeps the fullscreen-only commands.
 
 ### `/plan`
 
@@ -209,13 +214,13 @@ Save a note to memory immediately, without waiting for an automatic summary.
 
 Open the extensions modal on the Hooks tab, where you can view loaded hooks, add or remove custom ones, and toggle them individually. The modal does not grant project trust — see [10-hooks.md](10-hooks.md) for the trust model.
 
-The shell also advertises individual `/hooks-list`, `/hooks-trust`, `/hooks-add`, `/hooks-remove`, and `/hooks-untrust` commands; in the TUI pager these are folded into the `/hooks` modal.
+The shell also advertises individual `/hooks-list`, `/hooks-trust`, `/hooks-add`, `/hooks-remove`, and `/hooks-untrust` commands; in the pager these are folded into the `/hooks` modal.
 
 ### `/plugins`
 
 Open the extensions modal on the Plugins tab to view installed plugins, install new ones from the marketplace, and manage trust.
 
-The shell additionally supports subcommands (`/plugins list`, `/plugins install <source>`, `/plugins uninstall <name>`, `/plugins update`, `/plugins reload`). In the TUI, the modal does the same work visually.
+The shell additionally supports subcommands (`/plugins list`, `/plugins install <source>`, `/plugins uninstall <name>`, `/plugins update`, `/plugins reload`). In the pager, the modal does the same work visually.
 
 ### `/marketplace`
 
@@ -229,21 +234,9 @@ Open the extensions modal on the Skills tab to view installed skills.
 
 ## Media Generation
 
-### `/imagine <description>`
-
-Generate an image from a text description.
-
-```
-/imagine a golden sunset over a calm ocean with silhouetted palm trees
-```
-
-### `/imagine-video <description>`
-
-Generate a video from a text (or image) description. It plans shots, generates source images, and animates them with `image_to_video`.
-
-```
-/imagine-video a cat playing piano in a jazz club
-```
+Hosted image and video generation commands are not available in the clean
+build. Use an explicitly configured provider or local tool when your workflow
+needs media generation.
 
 ---
 
@@ -251,7 +244,7 @@ Generate a video from a text (or image) description. It plans shots, generates s
 
 ### `/loop [interval] <prompt>`
 
-Run a prompt on a recurring interval. Give the interval as `30m`, `1 hour`, or `every 2 days`; leave it out and Grok will ask.
+Run a prompt on a recurring interval. Give the interval as `30m`, `1 hour`, or `every 2 days`; leave it out and XAICode will ask.
 
 ```
 /loop 30m check deploy status
@@ -266,7 +259,7 @@ Intervals are `Ns` (seconds, minimum 60), `Nm` (minutes), `Nh` (hours), or `Nd` 
 
 ### `/goal`
 
-Set, manage, or check an autonomous goal. Grok works across rounds and only marks the goal complete after an independent evidence review confirms the claim; if that review can't reproduce the result or has no usable evidence, the goal stays active or pauses with concrete gaps.
+Set, manage, or check an autonomous goal. XAICode works across rounds and only marks the goal complete after an independent evidence review confirms the claim; if that review can't reproduce the result or has no usable evidence, the goal stays active or pauses with concrete gaps.
 
 ```
 /goal Migrate the auth module to the new API
@@ -288,7 +281,7 @@ Kick off a background research workflow. It plans a bounded set of questions, ga
 
 The command returns right away — follow progress in `/workflows`, and the final report appears in the conversation on its own.
 
-Model-launched workflows may set `agent_budget` on the `workflow` tool. It's an absolute cumulative cap on logical child-agent calls: every `agent()` call and every item in a `parallel()` panel spends one slot, while schema-correction retries don't. The default is 128, explicit values run 1–1,024, and a panel that would cross the remaining budget is rejected before any of its children launch. `budget()` reports the cap as `total`, admitted calls as `spent`, `reserved` (always zero), and `remaining`. Named slash launches use the default budget.
+Model-launched workflows may set `agent_budget` on the `workflow` tool. It's an absolute cumulative cap on logical child-agent calls: every `agent()` call and every item in a `parallel()` panel spends one slot, while schema-correction retries don't. The default is 128, explicit values run 1–1,024, and a panel that would cross the remaining budget is rejected before any of its children launch. Separately, a host-configured cap (32 by default) bounds how many children run at a time per run; larger panels queue and still act as a barrier. `budget()` reports the cap as `total`, admitted calls as `spent`, `reserved` (always zero), and `remaining`. Named slash launches use the default budget.
 
 ### `/workflow`
 
@@ -316,7 +309,7 @@ Open the live workflows **run** dashboard — active and retained runs, not a ca
 
 ### `/theme`
 
-Switch the TUI color theme. Alias: `/t`.
+Switch the color theme. Alias: `/t`.
 
 ### `/feedback [message]`
 
@@ -345,7 +338,7 @@ View release notes for the current version. Alias: `/changelog`.
 
 ### `/docs`
 
-Browse the in-TUI How-to Guides, open the online Build docs, or jump straight to a guide by title. Aliases: `/howto`, `/guides`.
+Browse the built-in How-to Guides, open the online Build docs, or jump straight to a guide by title. Aliases: `/howto`, `/guides`.
 
 ```
 /docs
@@ -428,7 +421,7 @@ Skills from plugins work the same way. When two skills share a name across scope
 /user:commit       # User-scoped skill
 ```
 
-Built-in commands always win over a skill with the same name. Name a skill "compact" and `/compact` still runs the built-in — but `/local:compact` invokes the skill.
+Built-in commands always win the bare name. Name a skill "compact" and `/compact` still runs the built-in — the skill stays available as `/local:compact` (or `/acme:compact` for a plugin). Both appear in the slash menu: the built-in is tagged `built-in` and the skill is tagged `skill · local` / `skill · acme`.
 
 ---
 

@@ -1,6 +1,6 @@
 # Headless Mode and Scripting
 
-Headless mode runs Xaicode non-interactively from the command line. It
+Headless mode runs XAICode non-interactively from the command line. It
 accepts a single prompt, executes it with the configured local tools, and
 returns the result. Use it to automate tasks, script workflows, build
 integrations, and parse output programmatically.
@@ -15,7 +15,7 @@ Passing a prompt non-interactively triggers headless mode. The most common way i
 xaicode -p "Your prompt here"
 ```
 
-Grok processes the prompt, runs any necessary tools, and prints the result to stdout. The process exits when the response is complete.
+XAICode processes the prompt, runs any necessary local tools, and prints the result to stdout. The process exits when the response is complete.
 
 ---
 
@@ -24,13 +24,14 @@ Grok processes the prompt, runs any necessary tools, and prints the result to st
 | Flag                    | Description                                           |
 | ----------------------- | ----------------------------------------------------- |
 | `-p, --single <PROMPT>` | The prompt to send (or use `--prompt-json` / `--prompt-file`) |
-| `-m, --model <MODEL>`   | Model to use (e.g., `local-model`)            |
+| `-m, --model <MODEL>`   | Model to use (for example, `local-model`)     |
 | `-s, --session-id <ID>` | Create a **new** session with this **UUID** (errors if invalid UUID or already in use under the target session directory; does not resume — use `-r`/`-c`) |
 | `--fork-session`        | With `-r`/`-c`, fork into a new session ID instead of appending to the original |
 | `-r, --resume <ID_OR_TITLE>` | Resume an existing session by ID, or by title for the current directory, ignoring letter case (a sole manually renamed match wins among duplicates; remaining duplicates error with their IDs; UUID-shaped values always take the ID path; scripts should prefer IDs) |
 | `-c, --continue`        | Continue the most recent session in current directory  |
 | `--cwd <PATH>`          | Set working directory                                 |
-| `--output-format <FMT>` | Output format: `plain`, `json`, `streaming-json`      |
+| `--output-format <FMT>` | Output format: `plain`, `json`, `streaming-json`, `streaming-messages-json` |
+| `--include-partial-messages` | Emit raw `stream_event` deltas. Only affects `--output-format streaming-messages-json`; ignored (with a warning) otherwise. |
 | `--yolo`                | Auto-approve all tool executions                      |
 | `--rules <TEXT>`        | Custom rules for the system prompt                    |
 | `--tools <TOOLS>`       | Allowlist of built-in tools (comma-separated). MCP meta-tools remain available unless denied. Headless only. |
@@ -102,13 +103,13 @@ For path rules (`Read`, `Edit`, `Write`, `Grep`), `*` is a single-level wildcard
 
 ```bash
 # Deny shell commands matching "rm*"
-grok -p "Clean up this project" --deny "Bash(rm*)"
+xaicode -p "Clean up this project" --deny "Bash(rm*)"
 
 # Allow npm commands, deny sudo
-grok -p "Set up the project" --allow "Bash(npm*)" --deny "Bash(sudo*)"
+xaicode -p "Set up the project" --allow "Bash(npm*)" --deny "Bash(sudo*)"
 
 # Allow all bash commands (auto-approve without prompting)
-grok -p "Build the project" --allow "Bash"
+xaicode -p "Build the project" --allow "Bash"
 ```
 
 `--allow` and `--deny` can be repeated. Deny rules take precedence over allow rules.
@@ -117,7 +118,7 @@ grok -p "Build the project" --allow "Bash"
 
 ## Output Formats
 
-Headless mode supports three output formats, selected with `--output-format`.
+Headless mode supports four output formats, selected with `--output-format`.
 
 ### plain (default)
 
@@ -131,34 +132,33 @@ Here's a summary of the codebase...
 
 A single JSON object emitted after the response completes: response text,
 stop reason, session ID, request ID (plus `thought` when reasoning is present).
-When the prompt reached the model, the same object also carries spend fields
-(`usage`, `num_turns`, `modelUsage`, cost).
+When the prompt reached the model, the same object also carries usage fields
+(`usage`, `num_turns`, and `modelUsage`). `stopReason` is the snake_case
+ACP/Messages token (`end_turn`, `max_tokens`, …).
 
 ```json
 {
   "text": "Here's a summary of the codebase...",
-  "stopReason": "EndTurn",
+  "stopReason": "end_turn",
   "sessionId": "abc123",
   "requestId": "xyz789",
   "num_turns": 7,
   "usage": {
     "input_tokens": 7210,
     "cache_read_input_tokens": 41000,
+    "cache_creation_input_tokens": 0,
     "output_tokens": 1893,
     "reasoning_tokens": 412,
     "total_tokens": 50103
   },
   "modelUsage": {
-    "grok-build": {
+    "local-model": {
       "inputTokens": 7210,
       "outputTokens": 1893,
       "cacheReadInputTokens": 41000,
-      "modelCalls": 7,
-      "costUSD": 0.01268905
+      "modelCalls": 7
     }
-  },
-  "total_cost_usd": 0.01268905,
-  "total_cost_usd_ticks": 126890500
+  }
 }
 ```
 
@@ -167,42 +167,31 @@ Usage notes:
 - `usage` sums tokens for the prompt, including subagents that finished
   before turn end (also under their own `modelUsage` keys). Compaction and
   other side-model calls are excluded.
-- **Token field policy (headless result / `end` / error spend):**
+- **Token field policy (headless result / `end` / error usage):**
   - `usage.input_tokens` and `modelUsage.*.inputTokens` are **uncached only**.
   - `cache_read_input_tokens` / `cacheReadInputTokens` are cache hits.
-  - `total_tokens` is full input + output (includes cache):
-    `total_tokens = input_tokens + cache_read_input_tokens + output_tokens`.
+  - `total_tokens` is full input + output (includes both cache buckets):
+    `total_tokens = input_tokens + cache_read_input_tokens + cache_creation_input_tokens + output_tokens`.
   - ACP `_meta.usage.inputTokens` (PromptUsage) is still the **full** prompt
     sum; only the headless projector subtracts cache. Prefer headless fields
-    for spend automation.
+    for usage automation.
 - `num_turns` counts main-agent model rounds recorded on the prompt ledger
   (tool-loop rounds that reported usage). Subagent sampler calls do not
   increase it. Per-model call counts (including subagents) stay on
   `modelUsage.*.modelCalls`. This is the same counter family as `--max-turns`,
   not a guarantee of exact equality when rounds lack usage or hit gates.
-- `total_cost_usd` appears only when the server reported a **complete** cost.
-  Absence means unreported or incomplete, never free. Cost is stamped for
-  API-key traffic today; pool/OAuth paths often omit it until the server
-  stamps cost. When some calls lacked cost, `cost_is_partial` is true and
-  **all** cost floats are omitted (`total_cost_usd` and every
-  `modelUsage.*.costUSD`) so consumers cannot sum model rows into a fake
-  complete bill.
-- `total_cost_usd_ticks` is the same value in exact integer ticks
-  (1 USD = 10^10 ticks) and appears under the same conditions. Use it for
-  billing reconciliation: summing per-invocation ticks matches the server's
-  usage export exactly, which float dollars cannot guarantee.
 - When subagent usage could not be applied, nested subagent usage was incomplete,
   or the success-path drain timed out (up to 120s on the turn task),
-  `usage_is_incomplete` is true and cost floats are omitted the same way
-  (token totals may under-count subagents). Cancel snapshots without that long
-  drain and marks incomplete while subagents are still live. Incomplete with
-  no recorded tokens emits only `usage_is_incomplete` (no zero `usage` object).
-- A prompt that never reached the model omits the spend fields.
+  `usage_is_incomplete` is true (token totals may under-count subagents).
+  Cancel snapshots without that long drain and mark usage incomplete while
+  subagents are still live. Incomplete with no recorded tokens emits only
+  `usage_is_incomplete` (no zero `usage` object).
+- A prompt that never reached the model omits the usage fields.
 
 The `sessionId` field is useful for resuming the conversation later.
 
-On failure, Grok emits an error object (process exit non-zero). Prompt-level
-failures may also include frozen spend fields when usage was recorded:
+On failure, XAICode emits an error object (process exit non-zero). Prompt-level
+failures may also include the usage fields that were recorded:
 
 ```json
 {"type":"error","message":"Couldn't start session: ..."}
@@ -210,63 +199,153 @@ failures may also include frozen spend fields when usage was recorded:
 
 ### streaming-json
 
-Newline-delimited JSON events emitted in real time. Each line is a self-contained JSON object with a `type` field:
+Newline-delimited JSON, one `type`-tagged object per line, derived from the agent's ACP session updates. Leaf field names (`toolCallId`, `kind`, `rawInput`, `rawOutput`) follow ACP; `toolName` and the `usage` line are XAICode additions. Consume it by switching on `type`.
 
 ```json
-{"type":"text","data":"Here's"}
-{"type":"text","data":" a summary"}
 {"type":"thought","data":"Analyzing the directory structure..."}
-{"type":"end","stopReason":"EndTurn","sessionId":"abc123","requestId":"xyz789","usage":{...},"num_turns":7,"modelUsage":{...}}
+{"type":"tool_call","toolCallId":"call_1","title":"Read","kind":"read","status":"in_progress","toolName":"read_file","rawInput":{"path":"src/main.rs"},"content":[],"locations":[]}
+{"type":"tool_call_update","toolCallId":"call_1","status":"completed","content":[],"rawOutput":{"lines":42},"locations":[]}
+{"type":"text","data":"Here's a summary"}
+{"type":"usage","messageId":"resp_1","stopReason":"end_turn","usage":{"input_tokens":812,"output_tokens":45,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"reasoning_tokens":0},"signature":"..."}
+{"type":"end","stopReason":"end_turn","sessionId":"abc123","requestId":"xyz789","usage":{...},"num_turns":7,"modelUsage":{...}}
 ```
 
 Event types:
 
-| Type       | Description                                                    |
-| ---------- | -------------------------------------------------------------- |
-| `text`     | A chunk of the agent's response text                            |
-| `thought`  | Internal reasoning (thinking tokens)                            |
-| `end`      | Final event with metadata and spend fields when available       |
-| `error`    | An error occurred (carries `message`, and spend fields if any)  |
+| Type               | Description                                                                                  |
+| ------------------ | ------------------------------------------------------------------------------------------- |
+| `text`             | A chunk of the agent's response text                                                          |
+| `thought`          | Internal reasoning (thinking tokens)                                                          |
+| `tool_call`        | A tool call the agent started (`toolCallId`, `toolName`, `kind`, `status`, `rawInput`, `content`, `locations`) |
+| `tool_call_update` | Progress or result for a tool call (`status`, `rawOutput`, `content`, `locations`)            |
+| `usage`            | Per-response boundary (`messageId`, `stopReason`, `usage`, `signature`), one per model response |
+| `plan`             | The agent's current plan (`entries`)                                                          |
+| `available_commands` | Tool and slash command lists (`tools`, `commands`)                                          |
+| `end`              | Final event with metadata and usage fields when available                                    |
+| `error`            | An error occurred (carries `message`, and usage fields if any)                               |
 
-`end` is always the last event. Spend fields on `end` match the json object
-shape (snake_case uncached `input_tokens`, safe cost floats).
+`end` is always the last event. Usage fields on `end` match the json object
+shape (snake_case uncached `input_tokens` and related token counters). `end.stopReason`
+is the turn stop reason in snake_case (`end_turn`, `max_tokens`,
+`max_turn_requests`, `refusal`, `cancelled`); the verbatim per-response provider
+reason (e.g. `tool_use`, `pause_turn`) is on the `usage` line's `stopReason`.
+Per-response `message_id`/`stopReason`/`signature` are populated on the Messages
+API backend; other backends report what they carry.
 
-Grok may also emit `max_turns_reached` and `auto_compact_*` events; treat the list as non-exhaustive and switch on `type`.
+XAICode may also emit `max_turns_reached` and `auto_compact_*` events; treat the list as non-exhaustive and switch on `type`.
+
+### streaming-messages-json
+
+Newline-delimited JSON in the Messages API `stream-json` wire format. The data-bearing surface matches the Messages shape exactly. This includes the `assistant`/`user` message bodies, `usage`, `tool_use`/`tool_result`, inline web search, `stop_reason`, and the `--include-partial-messages` event framing. A consumer that reconstructs messages, reads usage, or detects errors works without changes.
+
+The `system`/`init` and terminal `result` lines carry metadata. XAICode emits the fields it has real data for and omits pure-placeholder fields it cannot fill, rather than zero-filling them. As a result, those two lines may not pass strict `init`/`result` schema validation. The individual fields are listed below. Read the fidelity notes before treating any one field as authoritative. For a native stream with no placeholder shape, use `streaming-json`.
+
+The stream opens with a `system`/`init` line, then `assistant` messages whose `message.content[]` holds `text`, `thinking`, and `tool_use` blocks, `user` messages carrying `tool_result` blocks, and a terminal `result`:
+
+```json
+{"type":"system","subtype":"init","session_id":"abc123","apiKeySource":"user","model":"local-model","cwd":"/repo","permissionMode":"default","tools":["read_file","bash"],"slash_commands":["review"],"mcp_servers":[{"name":"linear","status":"connected"}],"skills":[],"uuid":"..."}
+{"type":"assistant","message":{"id":"msg_0","type":"message","role":"assistant","model":"local-model","content":[{"type":"text","text":"Let me read the file."},{"type":"tool_use","id":"call_1","name":"read_file","input":{"path":"src/main.rs"}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{...}},"parent_tool_use_id":null,"session_id":"abc123","uuid":"..."}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"fn main() {}","is_error":false}]},"parent_tool_use_id":null,"session_id":"abc123","uuid":"..."}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":0,"duration_api_ms":0,"num_turns":7,"result":"Here's a summary...","stop_reason":"end_turn","usage":{"input_tokens":812,"output_tokens":210,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"server_tool_use":{"web_search_requests":0}},"modelUsage":{},"session_id":"abc123","uuid":"..."}
+```
+
+Message types:
+
+| Type        | Description                                                              |
+| ----------- | ---------------------------------------------------------------------- |
+| `system`    | Session preamble (`subtype: "init"`) with model, cwd, permission mode, tools, slash commands, and MCP servers. `subtype: "compact_boundary"` marks an auto compaction |
+| `assistant` | A model message; `message.content[]` holds `text`/`thinking`/`tool_use`, plus `server_tool_use`/`web_search_tool_result` for inline backend web search |
+| `user`      | Tool results, as `tool_result` blocks inside `message.content[]`         |
+| `result`    | Terminal message with final text, stop reason, and usage fields         |
+
+The `assistant` and `user` messages carry `session_id`, `uuid`, and `parent_tool_use_id` (`null` for the main conversation). The `system`/`init` and terminal `result` lines carry `session_id` and `uuid` but no `parent_tool_use_id`.
+
+The `uuid` on each line is freshly generated per emitted line. It is not a provider, message, or event id, and not a correlation key. It does not match the provider `message.id` (that value rides `assistant.message.id`). It is unique per line, even for lines that describe the same message, and it carries no cross-line or cross-run identity. Do not use it to correlate or deduplicate.
+
+Text and reasoning chunks are grouped into one assistant message per model response. A response's parallel `tool_result` blocks are grouped into a single `user` message. `result.result` is the final assistant message text. A model response that produces no content blocks emits no `assistant` line in the default mode. Only `--include-partial-messages` surfaces such a response, as its empty `message_start` … `message_stop` envelope.
+
+On `init`, `skills` is live. It lists the session's user-invocable skill names, a subset of `slash_commands` sourced from the session's advertised commands, or `[]` when the session surfaces no skills. The `init` line is emitted once, deferred to the first output line so it captures the session's advertised `tools`, `slash_commands`, and `skills`. The Messages schema defines no second `init`, so a command list that changes after streaming begins is not re-advertised.
+
+The other `init` fields carry real data:
+
+- `apiKeySource` is `user` when a configured provider key is sent. Account-session values are not emitted by the clean build.
+- `permissionMode` is the effective headless mode mapped to the Messages enum: the `--permission-mode` value, or `bypassPermissions` under `--yolo`, else `default`. Modes not represented by the Messages schema collapse to `default`.
+- `mcp_servers[].status` reflects configuration, not live connection state. A configured server always reports `"connected"`, because per-server handshake state is not resolved by the time `init` is emitted.
+
+XAICode omits the schema's pure-placeholder `init` fields it has no data for, rather than emitting dummy values: `claude_code_version`, `output_style`, and `plugins`.
+
+`result` includes `duration_ms`, `duration_api_ms`, `num_turns`, `stop_reason`, `usage` (Messages API `message.usage` shape), and `modelUsage`. It also includes `errors[]` on the error subtypes. XAICode omits the schema's always-empty `permission_denials`, because it does not collect permission denials. `structured_output` (with `--json-schema`) is snake_case, matching the schema.
+
+`model` appears on `init` and every `assistant` frame. It is the real model id when known, and the literal `"unknown"` only when no model is known at emit time.
+
+The assistant frame's `stop_sequence` is wired end-to-end. It carries the provider's matched stop sequence when the model stopped on a configured one (`stop_reason: "stop_sequence"`), and is `null` on every other stop reason and backend. In `--include-partial-messages` framing, the matched sequence rides both the flushed `assistant` frame and the partial `message_delta.stop_sequence`, so a partial rebuild matches the frame. Only the partial `message_start.stop_sequence` stays `null`, because the matched sequence is not known at message open.
+
+The emitted error subtypes are `error_max_turns`, `error_during_execution`, and `error_max_structured_output_retries`. The schema's `error_max_budget_usd` subtype is not emitted; headless limits are expressed with `--max-turns` and local task controls.
+
+`result.usage` reports the Messages `message.usage` shape with the three token buckets disjoint: `input_tokens` (uncached), `cache_read_input_tokens`, and `cache_creation_input_tokens`. XAICode derives these from the turn's aggregate ledger, reshaped into those buckets. Subagent cache creation is included in `cache_creation_input_tokens`. The aggregate ledger tracks it as its own bucket, so it is no longer folded into `input_tokens`.
+
+`result.usage` always emits numeric buckets, even when data is missing. This happens when the turn's usage ledger is incomplete (the same condition that surfaces `usage_is_incomplete` in the `json` format), or when no aggregate ledger reached the reducer at all. Any bucket XAICode cannot account for falls back to `0`, because the Messages API schema has no marker for incomplete or absent usage. The reducer logs a warning to stderr in both cases. Read an all-zero `usage` here as "unknown", not as an absence of work.
+
+The nested `server_tool_use` counter is populated. `web_search_requests` is the number of *successful* backend web searches emitted this run. Failed searches and non-search `WebSearch` actions such as open_page are excluded from the successful request count. A failed backend search still emits a `web_search_tool_result` in the error shape (`content.type: "web_search_tool_result_error"`), but is not counted. Its `error_code` is a fixed `"unavailable"` placeholder, not a code forwarded from the backend. There is no `web_fetch_requests` key because headless mode has no server-side `web_fetch`, so the placeholder is omitted.
+
+Backend web search is inline. It folds into the same `assistant` frame as the surrounding text. The frame carries a `server_tool_use` block (`name: "web_search"`, `input.query`) immediately followed by a `web_search_tool_result` block. That result block's `tool_use_id` matches the `server_tool_use.id`, and its `content` is a `web_search_result` hit array of `{type, url, title}`. This matches the Messages API's inline server-tool shape rather than splitting the response across frames.
+
+X search and code interpreter are a documented divergence. They stay generic, surfaced as a client `tool_use` block plus a `user` `tool_result`, because the Messages API defines no inline block type for them. Every other client tool likewise keeps the `tool_use`/`tool_result` split.
+
+`--include-partial-messages` emits the raw event framing so a consumer can rebuild each message with the Messages streaming accumulator. The framing is `message_start`, `content_block_start`/`content_block_delta`/`content_block_stop`, `message_delta`, and `message_stop`. It carries the structural events an accumulator needs. The deltas are coarser than the Messages API's token-level streaming: tool input arrives as a single `input_json_delta`, and `citations_delta` is never produced (see below). The result is a faithful reconstruction of each message rather than a token-by-token replay.
+
+On the Messages API backend, the framing is faithful. `message_start` carries the real provider `message.id` and the input-side `usage`. A thinking block emits its `signature_delta` in order, before the block's `content_block_stop`. The `message_start.usage` input side reports all three prompt-side buckets known at message open: `input_tokens` (the uncached portion), `cache_read_input_tokens`, and `cache_creation_input_tokens`. A cache hit is therefore visible on `message_start`, rather than only appearing later on `message_delta`/`result`. `output_tokens` seeds `0` there and is finalized on `message_delta`. A response that starts but produces no content still emits the `message_start` … `message_stop` envelope with no content blocks.
+
+Some backends surface per-response metadata only at end of turn. Those backends fall back to a synthesized `message_start.id` and zero-seeded input `usage`. They defer the reasoning `signature` to the final `assistant` line, which is authoritative in that case.
+
+Tool-call input is emitted as a single `input_json_delta` carrying the complete arguments JSON, followed by `content_block_stop`. It is not a sequence of token-level fragments. This is a deliberate divergence from the Messages API's incremental `partial_json` streaming. XAICode's ACP tool-call path delivers each tool call as one validated JSON object once the arguments are fully parsed, so a single delta is the accurate representation. A consumer that concatenates `partial_json` reassembles the identical object either way. The backend web-search `server_tool_use` block's `input.query` is emitted the same way, as one `input_json_delta`.
+
+The Messages API `citations_delta` carries inline citations for cited text spans, such as those from web search. This stream does not produce it. XAICode's Messages content deltas are limited to text, thinking, signature, and tool-input JSON, so there is no citation data to surface as a `citations_delta`. Backend web-search source URLs are reported inline on the completed `web_search_tool_result` block instead (see above), not as per-span text citations.
+
+Fidelity caveats apply to a few fields.
+
+`duration_ms` is the prompt-execution wall clock. `duration_api_ms` is the summed *reported* per-call model time. A model call that does not report its own duration contributes `0`, so `duration_api_ms` can under-count the true API time.
+
+`num_turns` is authoritative when known. When it is not, it falls back to the count of completed model responses this turn. A completed but contentless response emits no `assistant` line, yet still counts as a turn.
+
+`modelUsage` carries the per-model token fields XAICode tracks, plus `webSearchRequests` attributed to the active model. The reducer tracks a single global web-search count rather than per-model, so the whole count lands on the current or last model and other rows stay `0`. `contextWindow` is the current model's real total context window (the same value XAICode uses for auto-compaction), and it appears only on the current model's row. Other rows omit it, and so does the current row when the window is unknown. `maxOutputTokens` is omitted when no model metadata is available. `modelUsage` is `{}` when no per-model breakdown is available.
+
+Like `streaming-json`, this stream is read only. Tool approvals and other bidirectional flows use the ACP interface (`xaicode agent`).
 
 ---
 
 ## Session Management in Headless Mode
 
-By default, each `grok -p` invocation creates a fresh session. To maintain context across calls, use session flags.
+By default, each `xaicode -p` invocation creates a fresh session. To maintain context across calls, use session flags.
 
 ### Named Sessions (`-s`)
 
-To carry context across headless calls, use `-r/--resume` or `-c/--continue`. Use `-s/--session-id` only for a **new** session with a **UUID** (errors if not a UUID or already in use under the target directory). Older hidden `-s` upsert/resume behavior is gone — use `-r`/`-c` to continue. With `-r`/`-c`, `-s` requires `--fork-session`:
+To carry context across headless calls, use `-r/--resume` or `-c/--continue`. Use `-s/--session-id` only for a **new** session with a **UUID** (errors if not a UUID or already in use under the target directory). Older hidden `-s` upsert/resume behavior is gone. Use `-r`/`-c` to continue. With `-r`/`-c`, `-s` requires `--fork-session`:
 
 ```bash
 # Start a headless session and capture its ID
-grok -p "Review the changes in this PR" --output-format json | jq -r '.sessionId'
+xaicode -p "Review the changes in this PR" --output-format json | jq -r '.sessionId'
 
 # Continue in the same session
-grok -p "Now check for security issues" --resume "<id>"
+xaicode -p "Now check for security issues" --resume "<id>"
 
 # Optional: create with a client-chosen UUID (must not already exist)
-grok -p "hello" --session-id "$(uuidgen | tr '[:upper:]' '[:lower:]')" --output-format json
+xaicode -p "hello" --session-id "$(uuidgen | tr '[:upper:]' '[:lower:]')" --output-format json
 ```
 
 > **Note:** `-s/--session-id` creates a new session only (valid UUID; errors if already in use). Use `-r` to resume.
 
 ### Resume (`-r`)
 
-The `-r/--resume` flag resumes a specific session by ID, or by title for the current directory when the value is not an ID, ignoring letter case (a sole manually renamed match wins among duplicates; remaining duplicates error with their IDs; UUID-shaped values always take the ID path — scripts should prefer IDs). It errors if the session does not exist:
+The `-r/--resume` flag resumes a specific session by ID, or by title for the current directory when the value is not an ID, ignoring letter case (a sole manually renamed match wins among duplicates; remaining duplicates error with their IDs; UUID-shaped values always take the ID path, so scripts should prefer IDs). It errors if the session does not exist:
 
 ```bash
 # Get the session ID from a previous JSON response
-grok -p "Remember: the secret number is 42" --output-format json
+xaicode -p "Remember: the secret number is 42" --output-format json
 # Output includes "sessionId": "abc123"
 
 # Resume that exact session
-grok -p "What's the secret number?" --resume abc123
+xaicode -p "What's the secret number?" --resume abc123
 ```
 
 ### Continue (`-c`)
@@ -274,7 +353,7 @@ grok -p "What's the secret number?" --resume abc123
 The `-c/--continue` flag continues the most recent session in the current working directory:
 
 ```bash
-grok -p "Continue where we left off" -c
+xaicode -p "Continue where we left off" -c
 ```
 
 ### Extracting Session IDs
@@ -282,7 +361,7 @@ grok -p "Continue where we left off" -c
 Use `--output-format json` and parse the `sessionId` field:
 
 ```bash
-grok -p "Hello" --output-format json | jq -r '.sessionId'
+xaicode -p "Hello" --output-format json | jq -r '.sessionId'
 ```
 
 ---
@@ -295,10 +374,10 @@ Headless mode works naturally with Unix pipes and redirection.
 
 ```bash
 # Pipe output to a file
-grok -p "Generate a README" > README.md
+xaicode -p "Generate a README" > README.md
 
 # Parse JSON output with jq
-grok -p "List files" --output-format json | jq -r '.text'
+xaicode -p "List files" --output-format json | jq -r '.text'
 ```
 
 ### Standard Input
@@ -307,12 +386,12 @@ Headless mode does not read piped stdin into the prompt. Pass external content t
 
 ```bash
 # Include git diff as context via command substitution
-grok -p "Write a concise commit message for these changes:
+xaicode -p "Write a concise commit message for these changes:
 
 $(git diff --staged)"
 
 # Or read the prompt from a file
-grok --prompt-file ./prompt.txt
+xaicode --prompt-file ./prompt.txt
 ```
 
 ---
@@ -322,14 +401,14 @@ grok --prompt-file ./prompt.txt
 ### Automated Code Review
 
 ```bash
-grok -p "Review changes for bugs and security issues." \
+xaicode -p "Review changes for bugs and security issues." \
   --output-format json --yolo | jq -r '.text' > review.md
 ```
 
 ### Pre-Commit Hook
 
 ```bash
-grok -p "Review staged changes for obvious bugs. Reply OK if fine, or list issues." \
+xaicode -p "Review staged changes for obvious bugs. Reply OK if fine, or list issues." \
   --yolo --output-format json | jq -r '.text' | grep -q "^OK" || exit 1
 ```
 
@@ -337,7 +416,7 @@ grok -p "Review staged changes for obvious bugs. Reply OK if fine, or list issue
 
 ```bash
 for file in src/*.js; do
-  grok -p "Migrate $file from CommonJS to ES modules." --yolo
+  xaicode -p "Migrate $file from CommonJS to ES modules." --yolo
 done
 ```
 
@@ -347,14 +426,14 @@ done
 
 ### Python Wrapper
 
-Grok's headless mode can be wrapped as an OpenAI-compatible chat completion API:
+XAICode's headless mode can be wrapped as an OpenAI-compatible chat completion API:
 
 ```python
 import asyncio
 import json
 import os
 
-class GrokChat:
+class XAICodeChat:
     """Simple OpenAI-compatible wrapper using headless mode."""
 
     def __init__(self, cwd="."):
@@ -362,11 +441,11 @@ class GrokChat:
         self.env = {**os.environ}
 
     def _build_cmd(self, prompt, model, stream):
-        return ["grok", "-p", prompt, "-m", model, "--cwd", self.cwd,
+        return ["xaicode", "-p", prompt, "-m", model, "--cwd", self.cwd,
                 "--output-format", "streaming-json" if stream else "json",
                 "--yolo"]
 
-    async def create(self, messages, model="grok-build", stream=False):
+    async def create(self, messages, model="local-model", stream=False):
         prompt = messages[-1]["content"] if len(messages) == 1 else "\n".join(
             f"{m['role']}: {m['content']}" for m in messages
         )
@@ -402,7 +481,7 @@ class GrokChat:
 
 
 async def main():
-    client = GrokChat(cwd=".")
+    client = XAICodeChat(cwd=".")
     response = await client.create(
         [{"role": "user", "content": "What files are here?"}]
     )
@@ -417,7 +496,7 @@ asyncio.run(main())
 #!/bin/bash
 # Run a code review and exit with failure if issues are found
 
-RESULT=$(grok -p "Review this PR for bugs. Output JSON with 'issues' array." \
+RESULT=$(xaicode -p "Review this PR for bugs. Output JSON with 'issues' array." \
   --output-format json --yolo | jq -r '.text')
 
 ISSUE_COUNT=$(echo "$RESULT" | jq '.issues | length' 2>/dev/null || echo "0")
@@ -472,8 +551,8 @@ xaicode -p "Run the test suite" --yolo
 
 | Code | Meaning                              |
 | ---- | ------------------------------------ |
-| `0`  | Success -- prompt completed normally |
-| `1`  | Error -- authentication failure, network error, or runtime error |
+| `0`  | Success. The prompt completed normally |
+| `1`  | Error. Authentication failure, network error, or runtime error |
 | `130` | Interrupted by SIGINT (Ctrl+C)                                   |
 | `143` | Terminated by SIGTERM                                            |
 
@@ -483,6 +562,8 @@ xaicode -p "Run the test suite" --yolo
 
 Headless mode uses the same provider-key configuration as the TUI. There is no
 browser login, device-code flow, cached account token, or account fallback.
+Set `CODING_AGENT_API_KEY` (or the selected model's `api_key`/`env_key`) and,
+when needed, `CODING_AGENT_API_BASE_URL` before starting `xaicode`.
 
 ---
 
@@ -497,11 +578,11 @@ browser login, device-code flow, cached account token, or account fallback.
 
 ## Project Root Discovery
 
-When Xaicode starts, it discovers the project root by walking upward from `--cwd`
+When XAICode starts, it discovers the project root by walking upward from `--cwd`
 (or the current directory) until it finds a `.git` directory.
 
 Note: If `--cwd` is nested inside a large repository (such as a monorepo),
-Grok discovers that repository as the project root and scopes its discovery (AGENTS.md, skills, git history) to it, which can make
+XAICode discovers that repository as the project root and scopes its discovery (AGENTS.md, skills, git history) to it, which can make
 startup slow. Point `--cwd` at the specific subproject you want to work in to keep
 the scope small.
 
@@ -509,7 +590,7 @@ the scope small.
 
 ## File Locations
 
-Xaicode stores local data in the upstream-compatible `~/.grok` directory
+XAICode stores local data in the upstream-compatible `~/.grok` directory
 (override with `GROK_HOME`; see [Environment Variables for Headless](#environment-variables-for-headless)):
 
 | Path                     | Contents                              |
@@ -533,7 +614,7 @@ For containers or CI, mount `~/.grok` read-only:
 
 - Provide `CODING_AGENT_API_KEY` and (when needed) `CODING_AGENT_API_BASE_URL`
 - Session persistence fails silently (ephemeral)
-- Remote update checks are not compiled into the clean runtime
+- Update checks are not compiled into the clean runtime
 
 ```bash
 export CODING_AGENT_API_KEY="your-key"
@@ -576,6 +657,6 @@ On SIGINT/SIGTERM:
 - Session state saved up to the last completed tool call
 - File modifications by tools are **not rolled back**
 - Exit code is **130** for SIGINT (`128 + 2`) and **143** for SIGTERM (`128 + 15`); CI pipelines can distinguish these from a normal error (exit code `1`)
-- Resume: `grok -p "continue" --resume "<id>"` or `grok -p "continue" --continue`
+- Resume: `xaicode -p "continue" --resume "<id>"` or `xaicode -p "continue" --continue`
 
 See [Session Management in Headless Mode](#session-management-in-headless-mode) for details on named sessions and the `-s`/`-r`/`-c` flags.

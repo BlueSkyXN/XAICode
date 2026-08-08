@@ -23,15 +23,27 @@ pub fn bootstrap(
     auth_manager: &Arc<AuthManager>,
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> Result<(AgentConfig, ModelsManager), String> {
+    xai_grok_telemetry::startup::enter(xai_grok_telemetry::startup::StartupPhase::Bootstrap);
     let mut cfg = cfg.clone();
     // The upstream bootstrap fetched remote settings and enforced managed
     // policy before constructing the agent. Keep configuration strictly local
     // in the clean build, even when stale fields exist on disk.
     cfg.remote_settings = None;
-    let cfg = resolve_config(&cfg, auth_manager);
-    cfg.validate_model_filters()?;
-    init_process(&cfg, auth_manager);
-    let models_manager = ModelsManager::from_config(&cfg, prefetched, auth_manager.clone())?;
+    let cfg = {
+        let _timer = crate::instrumentation_timer!("startup.bootstrap.resolve_config");
+        let cfg = resolve_config(&cfg, auth_manager);
+        cfg.validate_model_filters()?;
+        cfg
+    };
+    {
+        let _timer = crate::instrumentation_timer!("startup.bootstrap.init_process");
+        init_process(&cfg, auth_manager);
+    }
+    xai_grok_telemetry::startup::enter(xai_grok_telemetry::startup::StartupPhase::ModelCatalog);
+    let models_manager = {
+        let _timer = crate::instrumentation_timer!("startup.bootstrap.models_manager");
+        ModelsManager::from_config(&cfg, prefetched, auth_manager.clone())?
+    };
 
     Ok((cfg, models_manager))
 }
@@ -111,7 +123,8 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
         // agent) passes through here, so diagnostic uploads always carry
         // the version stamp and the resource ceilings in effect.
         xai_grok_telemetry::unified_log::set_version(xai_grok_version::VERSION);
-        crate::util::limits::log_effective_limits();
+        let limits = crate::util::limits::ProcessLimits::read();
+        limits.log();
 
         let grok_home = crate::util::grok_home::grok_home();
         crate::builtin::extract_builtin_files(&grok_home);

@@ -11,15 +11,30 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   BIN_NAME: xaicode
+  COMPAT_BIN_NAME: xai-grok-pager
 
 jobs:
+  preflight:
+    name: "release contract"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate provenance, product version, binaries, and tag
+        run: python3 scripts/xaicode_maintenance.py check-contract
+
   build:
     name: "build / ${{ matrix.target }}"
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -36,10 +51,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.92.0
+      - name: Install Rust 1.94.0
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.92.0"
+          toolchain: "1.94.0"
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
@@ -61,18 +76,36 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           dotslash --version
 
-      - name: Build xaicode binary
+      - name: Build xaicode binaries
         run: |
-          cargo build -p xaicode --profile release-dist --bin ${{ env.BIN_NAME }}
+          cargo build -p xaicode --profile release-dist \
+            --bin ${{ env.BIN_NAME }} \
+            --bin ${{ env.COMPAT_BIN_NAME }}
           ls -la target/release-dist/${{ env.BIN_NAME }}
+          ls -la target/release-dist/${{ env.COMPAT_BIN_NAME }}
 
-      - name: Smoke test xaicode binary
+      - name: Smoke test xaicode binaries
         run: |
           set -euo pipefail
           BIN="target/release-dist/${{ env.BIN_NAME }}"
+          COMPAT_BIN="target/release-dist/${{ env.COMPAT_BIN_NAME }}"
           test -x "$BIN"
+          test -x "$COMPAT_BIN"
           "$BIN" --version
           "$BIN" --help >/dev/null
+          "$COMPAT_BIN" --version
+          "$COMPAT_BIN" --help >/dev/null
+
+      - name: Validate clean custom-provider boundary against release binary
+        env:
+          GROK_BINARY: ${{ github.workspace }}/target/release-dist/${{ env.BIN_NAME }}
+        run: |
+          cargo test -p xai-grok-shell \
+            --test test_global_extra_headers_e2e \
+            clean_custom_provider -- --ignored
+
+      - name: Validate provider query parameters and environment headers
+        run: cargo test -p xai-grok-sampler --test request_query_and_headers
 
       - name: Package artifact
         id: pkg
@@ -99,6 +132,8 @@ jobs:
     name: "draft release"
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
