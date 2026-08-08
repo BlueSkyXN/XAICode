@@ -406,6 +406,7 @@ def check_contract(args: argparse.Namespace) -> int:
 
     ci = (repo / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     release = (repo / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    dependabot = (repo / ".github/dependabot.yml").read_text(encoding="utf-8")
     toolchain = read_toml(repo / "rust-toolchain.toml")["toolchain"]["channel"]
     for workflow_name, workflow in (("CI", ci), ("release", release)):
         expect(
@@ -417,6 +418,24 @@ def check_contract(args: argparse.Namespace) -> int:
                 boundary_test in workflow,
                 f"{workflow_name} workflow does not run {boundary_test}",
             )
+    for obsolete_action in (
+        "actions/checkout@v4",
+        "actions/setup-python@v5",
+        "actions/upload-artifact@v4",
+        "actions/download-artifact@v4",
+    ):
+        expect(
+            obsolete_action not in ci and obsolete_action not in release,
+            f"workflow still uses obsolete action runtime: {obsolete_action}",
+        )
+    expect(
+        'package-ecosystem: "github-actions"' in dependabot,
+        "Dependabot does not maintain GitHub Actions",
+    )
+    expect(
+        'interval: "weekly"' in dependabot,
+        "GitHub Actions dependency maintenance is not weekly",
+    )
     expect("BIN_NAME: xaicode" in release, "release primary binary drifted")
     expect("COMPAT_BIN_NAME: xai-grok-pager" in release, "release does not name compatibility bin")
     expect(
