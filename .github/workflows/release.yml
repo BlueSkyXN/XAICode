@@ -84,6 +84,23 @@ jobs:
           ls -la target/release-dist/${{ env.BIN_NAME }}
           ls -la target/release-dist/${{ env.COMPAT_BIN_NAME }}
 
+      - name: Strip distribution binary
+        run: |
+          set -euo pipefail
+          BIN="target/release-dist/${{ env.BIN_NAME }}"
+          BEFORE_SIZE=$(wc -c < "$BIN")
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            strip --strip-all "$BIN"
+          elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+            strip -S -x "$BIN"
+          else
+            echo "Unsupported strip platform: ${{ matrix.os }}"; exit 1
+          fi
+          AFTER_SIZE=$(wc -c < "$BIN")
+          test "$AFTER_SIZE" -lt "$BEFORE_SIZE"
+          printf 'stripped %s from %s to %s bytes\n' "$BIN" "$BEFORE_SIZE" "$AFTER_SIZE"
+          file "$BIN"
+
       - name: Smoke test xaicode binaries
         run: |
           set -euo pipefail

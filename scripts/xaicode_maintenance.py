@@ -436,6 +436,22 @@ def check_contract(args: argparse.Namespace) -> int:
         'interval: "weekly"' in dependabot,
         "GitHub Actions dependency maintenance is not weekly",
     )
+    expect(
+        "name: Strip distribution binary" in release,
+        "release workflow does not strip the shipped binary",
+    )
+    expect(
+        'strip --strip-all "$BIN"' in release,
+        "release workflow does not strip Linux symbols",
+    )
+    expect(
+        'strip -S -x "$BIN"' in release,
+        "release workflow does not strip macOS symbols",
+    )
+    expect(
+        'test "$AFTER_SIZE" -lt "$BEFORE_SIZE"' in release,
+        "release workflow does not verify that stripping reduced the binary",
+    )
     expect("BIN_NAME: xaicode" in release, "release primary binary drifted")
     expect("COMPAT_BIN_NAME: xai-grok-pager" in release, "release does not name compatibility bin")
     expect(
