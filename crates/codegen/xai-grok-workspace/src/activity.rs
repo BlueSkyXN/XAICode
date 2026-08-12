@@ -7,7 +7,6 @@ use std::time::Instant;
 
 use dashmap::DashMap;
 use xai_file_utils::events::{Event, EventWriter, ToolCompletedSource, ToolOutcome};
-use xai_file_utils::queue::UploadQueueStats;
 use xai_tool_protocol::{IdleWithholdReason, ToolServerLifecycleStatus, ToolServerStatusPayload};
 
 const LIFECYCLE_NONE: u8 = 0;
@@ -68,11 +67,9 @@ pub struct ActivityTracker {
     idle_since_ms: AtomicU64,
     started_at: Instant,
     lifecycle: AtomicU8,
-    /// `Arc` so the upload queue (via [`notify_handle`](Self::notify_handle))
+    /// `Arc` so background activity (via [`notify_handle`](Self::notify_handle))
     /// can wake the same waiter the status publisher blocks on.
     notify: Arc<tokio::sync::Notify>,
-    /// Coupled upload-queue stats; unset for bare trackers (tests, queue-less mode).
-    upload_queue_stats: OnceLock<Arc<UploadQueueStats>>,
     /// Epoch ms a graceful drain began; `0` means "not draining".
     drain_started_ms: AtomicU64,
     /// Coupled artifact-producer task tracker; unset for bare trackers.
@@ -176,7 +173,6 @@ impl ActivityTracker {
             started_at: Instant::now(),
             lifecycle: AtomicU8::new(LIFECYCLE_NONE),
             notify: Arc::new(tokio::sync::Notify::new()),
-            upload_queue_stats: OnceLock::new(),
             drain_started_ms: AtomicU64::new(0),
             producer_tasks: OnceLock::new(),
             durability_busy_since_ms: AtomicU64::new(0),
@@ -217,12 +213,6 @@ impl ActivityTracker {
     /// second time is a no-op (the first map wins).
     pub fn set_event_writers(&self, writers: Arc<DashMap<String, EventWriter>>) {
         let _ = self.event_writers.set(writers);
-    }
-
-    /// Couple upload-queue stats (status reports queue depth; `is_drained` waits
-    /// for the queue). Set once; a second call is a no-op.
-    pub fn set_upload_queue_stats(&self, stats: Arc<UploadQueueStats>) {
-        let _ = self.upload_queue_stats.set(stats);
     }
 
     /// Couple the artifact-producer tracker (status counts producers, withholds
@@ -284,32 +274,19 @@ impl ActivityTracker {
         self.preview_activity_window_ms
     }
 
-    /// Pending upload-queue items (0 when no queue is coupled).
+    /// Hosted upload queues were removed. The wire field remains for peers
+    /// that still decode the legacy lifecycle payload.
     fn upload_queue_pending(&self) -> u64 {
-        self.upload_queue_stats
-            .get()
-            .map(|s| s.pending.load(Ordering::Relaxed))
-            .unwrap_or(0)
+        0
     }
 
-    /// Queue/drain status fields shared by both snapshot paths; all zero when no
-    /// queue is coupled. Best-effort: independent `Relaxed` loads can transiently
-    /// show `inflight > pending` (cosmetic; the drain reads `pending` alone).
+    /// Legacy queue/drain fields are always zero after hosted upload removal.
     fn drain_status_fields(&self) -> (u32, u64, u32, bool, Option<u64>) {
-        let (pending, pending_bytes, inflight, breaker) = match self.upload_queue_stats.get() {
-            Some(s) => (
-                s.pending.load(Ordering::Relaxed) as u32,
-                s.pending_bytes.load(Ordering::Relaxed),
-                s.inflight.load(Ordering::Relaxed) as u32,
-                s.circuit_breaker_active.load(Ordering::Relaxed),
-            ),
-            None => (0, 0, 0, false),
-        };
         let drain_started = match self.drain_started_ms.load(Ordering::Relaxed) {
             0 => None,
             ms => Some(ms),
         };
-        (pending, pending_bytes, inflight, breaker, drain_started)
+        (0, 0, 0, false, drain_started)
     }
 
     /// Whether a drain has been started (`set_draining` ran) in this process.
@@ -359,19 +336,16 @@ impl ActivityTracker {
         }
     }
 
-    /// Durability gate: returns (producers in flight, whether `idle_since_ms`
-    /// must be withheld). Idle is withheld while producers or queued uploads are
-    /// outstanding, except past the bounded hold cap, or — queued items only —
-    /// when the circuit breaker is tripped (queued items survive via disk spill +
-    /// restart recovery; an in-flight producer has nothing on disk yet, so it
-    /// withholds regardless of queue health). The hold resets when it clears.
+    /// Durability gate: returns (local producers in flight, whether
+    /// `idle_since_ms` must be withheld). Hosted queues no longer participate.
     fn durability_gate(&self, queue_pending: u32, breaker_tripped: bool) -> (u32, bool) {
         let producers = self
             .producer_tasks
             .get()
             .map(|t| t.len() as u32)
             .unwrap_or(0);
-        let withholding = producers > 0 || (queue_pending > 0 && !breaker_tripped);
+        let _ = (queue_pending, breaker_tripped);
+        let withholding = producers > 0;
         if !withholding {
             self.durability_busy_since_ms.store(0, Ordering::Relaxed);
             return (producers, false);
@@ -1151,79 +1125,6 @@ mod tests {
         assert!(t.is_drained());
     }
 
-    // ── upload-queue coupling + drain status fields ───────────────
-
-    /// Coupled queue depth surfaces in both aggregate and per-session payloads.
-    #[test]
-    fn snapshot_reports_coupled_upload_queue_stats() {
-        let t = ActivityTracker::new();
-        let stats = Arc::new(UploadQueueStats::new());
-        stats.pending.store(3, Ordering::Relaxed);
-        stats.pending_bytes.store(9000, Ordering::Relaxed);
-        stats.inflight.store(1, Ordering::Relaxed);
-        stats.circuit_breaker_active.store(true, Ordering::Relaxed);
-        t.set_upload_queue_stats(stats);
-
-        let agg = t.snapshot();
-        assert_eq!(agg.upload_queue_pending, 3);
-        assert_eq!(agg.upload_queue_pending_bytes, 9000);
-        assert_eq!(agg.upload_queue_inflight, 1);
-        assert!(agg.upload_queue_circuit_breaker_tripped);
-
-        t.tool_call_started("c1", "x", Some("sess-a"));
-        let sess = t.snapshot_session("sess-a");
-        assert_eq!(sess.upload_queue_pending, 3);
-        assert_eq!(sess.upload_queue_inflight, 1);
-        assert!(sess.upload_queue_circuit_breaker_tripped);
-    }
-
-    /// The queue-less path reports zeroed queue fields (legacy behaviour).
-    #[test]
-    fn snapshot_queue_fields_zero_without_coupled_queue() {
-        let t = ActivityTracker::new();
-        let s = t.snapshot();
-        assert_eq!(s.upload_queue_pending, 0);
-        assert_eq!(s.upload_queue_pending_bytes, 0);
-        assert_eq!(s.upload_queue_inflight, 0);
-        assert!(!s.upload_queue_circuit_breaker_tripped);
-        assert_eq!(s.drain_started_ms, None);
-    }
-
-    /// Draining with no tool calls but a non-empty queue is NOT drained.
-    #[test]
-    fn is_drained_requires_empty_upload_queue() {
-        let t = ActivityTracker::new();
-        let stats = Arc::new(UploadQueueStats::new());
-        stats.pending.store(2, Ordering::Relaxed);
-        t.set_upload_queue_stats(stats.clone());
-
-        t.set_draining();
-        assert!(
-            !t.is_drained(),
-            "queue still has 2 pending → not drained even with no tool calls"
-        );
-
-        stats.pending.store(0, Ordering::Relaxed);
-        assert!(t.is_drained(), "queue emptied → now fully drained");
-    }
-
-    /// The phase-1 drain condition must not wait on the queue.
-    #[test]
-    fn tools_idle_ignores_upload_queue() {
-        let t = ActivityTracker::new();
-        let stats = Arc::new(UploadQueueStats::new());
-        stats.pending.store(5, Ordering::Relaxed);
-        t.set_upload_queue_stats(stats);
-        assert!(
-            t.tools_idle(),
-            "no tool calls → tools idle regardless of queue"
-        );
-        assert!(
-            !t.is_drained(),
-            "but not fully drained while queue is non-empty"
-        );
-    }
-
     // ── durability-aware idle gating ───────────────────────────────
 
     #[tokio::test]
@@ -1255,122 +1156,6 @@ mod tests {
         assert!(
             s.idle_since_ms.is_some(),
             "idle must be restored once the producer completes"
-        );
-    }
-
-    #[test]
-    fn idle_withheld_while_upload_queue_pending() {
-        let t = ActivityTracker::new();
-        let stats = Arc::new(UploadQueueStats::new());
-        stats.pending.store(1, Ordering::Relaxed);
-        t.set_upload_queue_stats(stats.clone());
-
-        assert!(
-            t.snapshot().idle_since_ms.is_none(),
-            "pending uploads must withhold idle"
-        );
-
-        stats.pending.store(0, Ordering::Relaxed);
-        assert!(
-            t.snapshot().idle_since_ms.is_some(),
-            "idle must be restored once the queue empties"
-        );
-    }
-
-    #[test]
-    fn durability_hold_cap_expiry_allows_idle() {
-        let t = ActivityTracker::with_prune_window_and_idle_hold(
-            std::time::Duration::from_millis(SESSION_IDLE_PRUNE_MS),
-            1_000,
-        );
-        let stats = Arc::new(UploadQueueStats::new());
-        stats.pending.store(1, Ordering::Relaxed);
-        t.set_upload_queue_stats(stats);
-
-        assert!(t.snapshot().idle_since_ms.is_none(), "within the hold cap");
-
-        // Backdate the busy stamp past the cap.
-        t.durability_busy_since_ms
-            .store(now_ms() - 2_000, Ordering::Relaxed);
-        let s = t.snapshot();
-        assert!(
-            s.idle_since_ms.is_some(),
-            "expired hold cap must allow idle despite pending work"
-        );
-        assert_eq!(
-            s.upload_queue_pending, 1,
-            "the pending depth stays truthfully reported"
-        );
-    }
-
-    #[test]
-    fn durability_busy_stamp_resets_when_condition_clears() {
-        let t = ActivityTracker::with_prune_window_and_idle_hold(
-            std::time::Duration::from_millis(SESSION_IDLE_PRUNE_MS),
-            1_000,
-        );
-        let stats = Arc::new(UploadQueueStats::new());
-        stats.pending.store(1, Ordering::Relaxed);
-        t.set_upload_queue_stats(stats.clone());
-        let _ = t.snapshot(); // stamps the busy start
-        t.durability_busy_since_ms
-            .store(now_ms() - 600, Ordering::Relaxed);
-
-        stats.pending.store(0, Ordering::Relaxed);
-        let _ = t.snapshot();
-        assert_eq!(
-            t.durability_busy_since_ms.load(Ordering::Relaxed),
-            0,
-            "a clear condition must reset the stamp"
-        );
-
-        // A new busy condition measures its hold from a fresh stamp.
-        stats.pending.store(1, Ordering::Relaxed);
-        assert!(t.snapshot().idle_since_ms.is_none());
-    }
-
-    #[test]
-    fn breaker_tripped_allows_idle_despite_pending_work() {
-        let t = ActivityTracker::new();
-        let stats = Arc::new(UploadQueueStats::new());
-        stats.pending.store(3, Ordering::Relaxed);
-        stats.circuit_breaker_active.store(true, Ordering::Relaxed);
-        t.set_upload_queue_stats(stats);
-
-        let s = t.snapshot();
-        assert!(
-            s.idle_since_ms.is_some(),
-            "a tripped breaker must allow hibernation despite pending work"
-        );
-        assert!(s.upload_queue_circuit_breaker_tripped);
-    }
-
-    /// The breaker escape covers queued items only (they survive via disk
-    /// spill + restart recovery); an in-flight producer has nothing on disk
-    /// yet and must keep withholding idle even with the breaker tripped.
-    #[tokio::test]
-    async fn breaker_tripped_does_not_bypass_producer_hold() {
-        let t = ActivityTracker::new();
-        let stats = Arc::new(UploadQueueStats::new());
-        stats.circuit_breaker_active.store(true, Ordering::Relaxed);
-        t.set_upload_queue_stats(stats);
-        let tasks = tokio_util::task::TaskTracker::new();
-        t.set_producer_tasks(tasks.clone());
-
-        let gate = Arc::new(tokio::sync::Notify::new());
-        let gate2 = gate.clone();
-        let join = tasks.spawn(async move { gate2.notified().await });
-
-        assert!(
-            t.snapshot().idle_since_ms.is_none(),
-            "a producer must withhold idle even with the breaker tripped"
-        );
-
-        gate.notify_one();
-        join.await.expect("producer task must not panic");
-        assert!(
-            t.snapshot().idle_since_ms.is_some(),
-            "idle restored once the producer completes (breaker alone is no hold)"
         );
     }
 

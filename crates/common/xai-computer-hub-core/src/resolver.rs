@@ -4,9 +4,7 @@
 //! `Tool` carries associated `Args` / `Output` types and is therefore not
 //! object-safe. [`ToolHandle`] is the dyn-compatible projection used
 //! by every router build: typed tools are wrapped via
-//! [`ErasedTool::new`]; remote registrations expose
-//! [`crate::RemoteToolProxy`] which implements [`ToolHandle`]
-//! directly without an intermediate typed `Tool` impl.
+//! [`ErasedTool::new`] and register the resulting handle in a local registry.
 
 use std::sync::Arc;
 
@@ -23,31 +21,14 @@ use xai_tool_types::ToolDescription;
 
 use crate::registry::ToolRegistry;
 
-/// Active resolution returned by [`CompoundResolver::resolve`].
-///
-/// Variants share the same `tool` handle and `registration` shape; the
-/// discriminant only tells callers whether the executing handle dispatches
-/// in-process or forwards over a connection. Differentiating the variants
-/// is useful for metrics, log tags, and the local-shadows-remote rule
-/// applied when both planes register the same `tool_id`.
+/// Active local resolution returned by [`CompoundResolver::resolve`].
 #[derive(Debug, Clone)]
 pub enum ResolvedTool {
-    /// In-process tool resolved from the local registry.
     Local {
         /// Object-safe handle to the tool's `execute` entry point.
         tool: Arc<dyn ToolHandle>,
         /// Wire-shape registration record. Carries `tool_id`, the
         /// schema-bearing description, capabilities, and ownership data.
-        registration: ToolRegistration,
-    },
-    /// Remote registration resolved through a connection-backed proxy.
-    Remote {
-        /// Object-safe handle whose `execute` forwards over the
-        /// owning connection.
-        proxy: Arc<dyn ToolHandle>,
-        /// Wire-shape registration record (same shape as the local
-        /// variant — both store the active registration so callers do not
-        /// have to round-trip the registry for description / capabilities).
         registration: ToolRegistration,
     },
 }
@@ -56,7 +37,7 @@ impl ResolvedTool {
     /// Borrow the registration record regardless of variant.
     pub fn registration(&self) -> &ToolRegistration {
         match self {
-            Self::Local { registration, .. } | Self::Remote { registration, .. } => registration,
+            Self::Local { registration, .. } => registration,
         }
     }
 
@@ -64,7 +45,6 @@ impl ResolvedTool {
     pub fn handle(&self) -> &Arc<dyn ToolHandle> {
         match self {
             Self::Local { tool, .. } => tool,
-            Self::Remote { proxy, .. } => proxy,
         }
     }
 }
@@ -74,8 +54,7 @@ impl ResolvedTool {
 /// The router only needs identity, description, capabilities, and a
 /// JSON-typed `execute` entry point — exactly what this trait exposes.
 /// Adapters that wrap a typed `Tool` impl get [`ErasedTool`] for free;
-/// non-`Tool` handles (notably remote proxies) implement this trait
-/// directly.
+/// non-`Tool` local adapters may implement this trait directly.
 #[async_trait]
 pub trait ToolHandle: Send + Sync + std::fmt::Debug {
     /// Stable identity used by the router to route calls.
@@ -203,35 +182,16 @@ where
     }
 }
 
-/// Compose a local-first lookup over one (`local_only`) or two
-/// (`compound`) registries.
-///
-/// The lookup contract: `find_tool` is called on the local registry first;
-/// only if it returns `None` is the remote registry consulted. Any local
-/// registration shadows a same-id remote registration. Cross-session
-/// lookups return `None` — the caller may surface this as a
-/// [`ToolError::NotFound`] to keep ownership invisible to the requester.
+/// Resolve and dispatch against one local registry.
 #[derive(Debug)]
 pub struct CompoundResolver {
     local: Arc<dyn ToolRegistry>,
-    remote: Option<Arc<dyn ToolRegistry>>,
 }
 
 impl CompoundResolver {
     /// Compose a resolver that consults a single local registry.
     pub fn local_only(local: Arc<dyn ToolRegistry>) -> Self {
-        Self {
-            local,
-            remote: None,
-        }
-    }
-
-    /// Compose a resolver with both planes; `local` is consulted first.
-    pub fn compound(local: Arc<dyn ToolRegistry>, remote: Arc<dyn ToolRegistry>) -> Self {
-        Self {
-            local,
-            remote: Some(remote),
-        }
+        Self { local }
     }
 
     /// Borrow the local plane.
@@ -239,19 +199,9 @@ impl CompoundResolver {
         &self.local
     }
 
-    /// Borrow the optional remote plane.
-    pub fn remote(&self) -> Option<&Arc<dyn ToolRegistry>> {
-        self.remote.as_ref()
-    }
-
-    /// Resolve `(session, tool_id)` honouring the local-first rule.
+    /// Resolve `(session, tool_id)` in the local registry.
     pub fn resolve(&self, session: &SessionId, tool_id: &ToolId) -> Option<ResolvedTool> {
-        if let Some(hit) = self.local.find_tool(session, tool_id) {
-            return Some(hit);
-        }
-        self.remote
-            .as_ref()
-            .and_then(|r| r.find_tool(session, tool_id))
+        self.local.find_tool(session, tool_id)
     }
 
     /// Resolve `(session, tool_id)` and dispatch through the active

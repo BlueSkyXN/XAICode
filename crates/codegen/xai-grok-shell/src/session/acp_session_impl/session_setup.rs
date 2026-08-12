@@ -1,15 +1,7 @@
 //! Session initialization concern for `SessionActor`: `initialize`, prefix
-//! readiness, skills reload and reminders, session info, and model-metadata
-//! refresh.
+//! readiness, skills reload and reminders, session info, and response metadata.
 use super::*;
 impl SessionActor {
-    /// `true` for session-based ACP auth methods.
-    fn is_session_based_auth(&self) -> bool {
-        self.auth_method_id
-            .load()
-            .as_deref()
-            .is_some_and(crate::agent::auth_method::is_session_based_method)
-    }
     pub(super) fn to_acp_error(&self, err: SamplingError) -> acp::Error {
         if err.is_auth_error() {
             let method_guard = self.auth_method_id.load();
@@ -203,36 +195,20 @@ impl SessionActor {
         skill_count
     }
     /// Skills used for slash resolve, mid-turn interjection expansion, and
-    /// prompt skill listings. Same source as ACU: product REST for chat-kind
-    /// (TTL-cached; never disk), `SkillManager` for Build.
+    /// prompt skill listings. The source is always the local/plugin
+    /// `SkillManager` baseline.
     pub(crate) async fn slash_skills_for_resolve(
         &self,
     ) -> Vec<xai_grok_tools::implementations::skills::types::SkillInfo> {
-        match slash_commands::acu_skill_source(self.is_chat_kind) {
-            slash_commands::AcuSkillSource::Product => Vec::new(),
-            slash_commands::AcuSkillSource::Disk => {
-                let bridge = self.tool_bridge_handle();
-                bridge.slash_skills().await
-            }
-        }
+        let bridge = self.tool_bridge_handle();
+        bridge.slash_skills().await
     }
     /// Send `AvailableCommandsUpdate` to the client.
     ///
-    /// Chat-kind sessions advertise the product Skills REST catalog (same
-    /// source as `list_commands(kind=chat)`). Build sessions read disk skills
-    /// from the tools layer (`SkillManager`). Chat never falls back to disk.
-    /// Product REST failure (or missing auth) reuses the shared last-successful
-    /// product catalog (same as `list_commands(kind=chat)`); if none exists yet,
-    /// advertises builtins only (never invents product skill names, never disk).
-    /// Empty product success still advertises builtins.
+    /// Advertise the local/plugin skills from the tools layer (`SkillManager`).
     pub(super) async fn send_available_commands_update(&self) {
         let bridge = self.agent.borrow().tool_bridge().clone();
-        let skills = match slash_commands::acu_skill_source(self.is_chat_kind) {
-            slash_commands::AcuSkillSource::Product => {
-                return;
-            }
-            slash_commands::AcuSkillSource::Disk => bridge.slash_skills().await,
-        };
+        let skills = bridge.slash_skills().await;
         let tool_names: Vec<String> = bridge
             .tool_definitions()
             .await
@@ -343,159 +319,11 @@ impl SessionActor {
         }
         self.persist_announcement_state().await;
     }
-    /// Idle threshold for proactive model metadata refresh on session resume.
-    /// If the session has been idle longer than this, we fetch fresh model config
-    /// from cli-chat-proxy before the next API request to catch context_window changes.
-    pub(super) const IDLE_REFRESH_THRESHOLD_SECS: i64 = 600;
     /// Record the current time as the last API request timestamp.
     pub(super) fn record_api_request_time(&self) {
         let now_ms = chrono::Utc::now().timestamp_millis();
         self.last_api_request_at
             .store(now_ms, std::sync::atomic::Ordering::Relaxed);
-    }
-    /// Check if the session has been idle and proactively refresh model metadata.
-    ///
-    /// Called at the start of each turn. If idle > `IDLE_REFRESH_THRESHOLD_SECS`,
-    /// fetches `/models-v2` from cli-chat-proxy and updates the cached
-    /// context_window / max_completion_tokens if remote settings changed them.
-    ///
-    /// Skipped for BYOK users (no remote settings, no `/models-v2`).
-    pub(super) async fn maybe_refresh_model_metadata_on_resume(&self) {
-        if !cfg!(test) {
-            return;
-        }
-        if !self.is_session_based_auth() {
-            return;
-        }
-        let last_request_ms = self
-            .last_api_request_at
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if last_request_ms == 0 {
-            return;
-        }
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let idle_secs = (now_ms - last_request_ms) / 1000;
-        if idle_secs < Self::IDLE_REFRESH_THRESHOLD_SECS {
-            return;
-        }
-        let Some(current_config) = self.chat_state_handle.get_sampling_config().await else {
-            return;
-        };
-        let current_model = &current_config.model;
-        let base_url = &current_config.base_url;
-        if !crate::util::is_cli_chat_proxy_url(base_url) {
-            return;
-        }
-        tracing::info!(
-            idle_secs,
-            threshold_secs = Self::IDLE_REFRESH_THRESHOLD_SECS,
-            "Session resumed after idle — refreshing model metadata from cli-chat-proxy"
-        );
-        let Some(ref am) = self.auth_manager else {
-            tracing::debug!("No auth manager available for model metadata refresh");
-            return;
-        };
-        let _ = am.auth().await;
-        let provider: Arc<dyn xai_grok_auth::AuthCredentialProvider> = Arc::new(
-            crate::auth::credential_provider::ShellAuthCredentialProvider::new(
-                am.clone(),
-                None,
-                None,
-            ),
-        );
-        let middleware_client =
-            crate::http::with_auth_retry(crate::http::shared_client(), provider);
-        let url = format!("{}/models-v2", base_url);
-        let parse_models_response =
-            |json: serde_json::Value| -> Option<(std::num::NonZeroU64, Option<u32>)> {
-                let data = json.get("data")?.as_array()?;
-                for entry in data {
-                    let parsed = crate::remote::client::parse_remote_model_value(entry, base_url)?;
-                    if parsed.model == *current_model {
-                        return Some((parsed.context_window, parsed.max_completion_tokens));
-                    }
-                }
-                None
-            };
-        #[allow(unused_mut)]
-        let mut request = middleware_client
-            .get(&url)
-            .header("X-XAI-Token-Auth", "xai-grok-cli")
-            .header("x-grok-client-version", xai_grok_version::VERSION)
-            .header(
-                crate::http::CLIENT_MODE_HEADER,
-                crate::http::process_client_mode(),
-            )
-            .timeout(std::time::Duration::from_secs(5));
-        let built = match request.build() {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to build idle-refresh models request");
-                return;
-            }
-        };
-        let (response, stamp) =
-            match xai_grok_auth::execute_with_stamp(&middleware_client, built).await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to fetch models for idle refresh");
-                    return;
-                }
-            };
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            crate::auth::attribution::record_consumer_401(
-                am,
-                None,
-                crate::auth::attribution::ConsumerKind::IdleResumeModelRefresh,
-                "",
-                stamp.as_ref().map(|s| s.0.as_str()),
-            );
-        }
-        let result = if !response.status().is_success() {
-            tracing::warn!(
-                status = response.status().as_u16(),
-                "Failed to fetch models for idle refresh"
-            );
-            None
-        } else {
-            response
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(parse_models_response)
-        };
-        let Some((new_context_window, new_max_completion_tokens)) = result else {
-            tracing::debug!("Model metadata refresh: no update or fetch failed");
-            return;
-        };
-        let mut config_changed = false;
-        let mut updated_config = current_config.clone();
-        if current_config.context_window != new_context_window
-            && self.compaction.context_window_override.is_none()
-        {
-            tracing::info!(
-                old_context_window = current_config.context_window.get(),
-                new_context_window = new_context_window.get(),
-                "Context window updated on session resume"
-            );
-            updated_config.context_window = new_context_window;
-            config_changed = true;
-        }
-        if let Some(new_mct) = new_max_completion_tokens
-            && current_config.max_completion_tokens != Some(new_mct)
-        {
-            tracing::info!(
-                old_max_completion_tokens = current_config.max_completion_tokens,
-                new_max_completion_tokens = new_mct,
-                "Max completion tokens updated on session resume"
-            );
-            updated_config.max_completion_tokens = Some(new_mct);
-            config_changed = true;
-        }
-        if config_changed {
-            self.chat_state_handle
-                .update_sampling_config(updated_config);
-        }
     }
     /// Update cached sampling config if model metadata changed (from response headers).
     pub(super) async fn handle_model_metadata_update(

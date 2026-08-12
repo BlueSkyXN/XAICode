@@ -223,10 +223,7 @@ pub fn render(
         };
         let style = input_style(theme);
         buf.set_style(row, Style::default().bg(theme.bg_visual));
-        return agent
-            .prompt
-            .draw(buf, row, None, &style, None, None)
-            .cursor_pos;
+        return agent.prompt.draw(buf, row, None, &style, None).cursor_pos;
     }
     None
 }

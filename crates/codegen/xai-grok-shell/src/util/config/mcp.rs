@@ -213,7 +213,7 @@ pub fn load_mcp_servers(cwd: &std::path::Path, compat: &CompatConfig) -> Vec<acp
 /// loading from `~/.claude.json`, `~/.cursor/mcp.json`, or
 /// `.mcp.json` sources.
 ///
-/// Used by [`crate::session::managed_mcp::merge_managed_mcp_servers_sourced`]
+/// Used by [`crate::session::mcp_sources::merge_mcp_servers_sourced`]
 /// which handles those non-TOML sources separately with proper `ConfigSource`
 /// tracking. Using [`load_mcp_servers`] there would cause all entries to be
 /// tagged as `ConfigSource::ConfigToml`, hiding the true origin.
@@ -611,8 +611,6 @@ pub(crate) fn collect_mcp_setup_configs(
     }
     result
 }
-
-pub const MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY: &str = "__managed_gateway_connectors";
 
 /// Persist `disabled_tools` for a server under `[disabled_mcp_tools]` in config.toml.
 ///
@@ -1727,12 +1725,11 @@ pub fn disabled_mcp_server_names(cwd: &std::path::Path) -> std::collections::Has
 
 /// Names `grok mcp enable`/`disable` may target: user/project TOML (including
 /// setup-required/invalid entries that session merge drops), the user
-/// `disabled_mcp_servers` list, compat JSON (`.mcp.json`, Claude, Cursor),
-/// **plugin** MCP servers (same discovery as doctor/`/mcps`), and legacy
-/// managed `grok_com_*` (special-cased in the CLI).
+/// `disabled_mcp_servers` list, compat JSON (`.mcp.json`, Claude, Cursor), and
+/// **plugin** MCP servers (same discovery as doctor/`/mcps`).
 ///
-/// Does **not** include gateway connectors (`managed_gateway:…`); those use
-/// `disabled_mcp_tools.__managed_gateway_connectors` via the `/mcps` Space.
+/// `grok_com_*` is known only when a TOML / disabled / compat / plugin
+/// definition exists — not by prefix.
 pub fn cli_known_mcp_server_names(cwd: &std::path::Path) -> std::collections::HashSet<String> {
     let mut names = disabled_mcp_server_names(cwd);
     // Full TOML key set (list parity) — merge drops setup-required/invalid.
@@ -1741,12 +1738,10 @@ pub fn cli_known_mcp_server_names(cwd: &std::path::Path) -> std::collections::Ha
     // Doctor/Space path: resolved TOML + plugins + Claude + Cursor + `.mcp.json`.
     let registry = load_cli_plugin_registry(cwd);
     let compat = CompatConfig::default();
-    for (server, _) in crate::session::managed_mcp::merge_managed_mcp_servers_sourced(
-        cwd,
-        Some(&registry),
-        &compat,
-    ) {
-        let name = crate::session::managed_mcp::mcp_server_name(&server);
+    for (server, _) in
+        crate::session::mcp_sources::merge_mcp_servers_sourced(cwd, Some(&registry), &compat)
+    {
+        let name = crate::session::mcp_sources::mcp_server_name(&server);
         if !name.is_empty() {
             names.insert(name.to_string());
         }

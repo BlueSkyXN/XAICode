@@ -37,13 +37,6 @@ pub enum ActionId {
     // Prompt
     SendPrompt,
     InterjectPrompt,
-    /// Enable voice mode and start recording (`/voice`). Not a toggle — it
-    /// never turns voice mode off; capture is controlled by [`Self::VoiceToggle`].
-    EnableVoiceMode,
-    /// Start/stop mic capture (Ctrl+Space / Esc). Starting also enables voice
-    /// mode and spawns the pipeline if needed — no `/voice` prerequisite.
-    VoiceToggle,
-
     // Navigation
     ScrollUp,
     ScrollDown,
@@ -908,7 +901,6 @@ mod tests {
             KeyCode::Char('m'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         );
-        let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
 
         // Single binding: Ctrl+R while scrollback is focused.
         assert_eq!(
@@ -930,26 +922,12 @@ mod tests {
         // Former mouse-toggle dual bindings removed from scrollback.
         assert_eq!(registry.lookup(&f9, When::ScrollbackFocused), None);
         assert_eq!(registry.lookup(&f9, When::AgentScreen), None);
-        // Ctrl+Shift+M is no longer the voice chord — it resolves to nothing.
+        // Ctrl+Shift+M remains unbound.
         assert_eq!(
             registry.lookup(&ctrl_shift_m, When::ScrollbackFocused),
             None
         );
         assert_eq!(registry.lookup(&ctrl_shift_m, When::Always), None);
-        // Voice capture is bound to BOTH Ctrl+Space and F8, and is global
-        // (`When::Always`) so it resolves on the agent screen and the dashboard
-        // alike (distinct from Ctrl+M model picker / multiline). It is not
-        // agent-scoped, so an exact AgentScreen lookup misses.
-        assert_eq!(
-            registry.lookup(&ctrl_space, When::Always),
-            Some(ActionId::VoiceToggle)
-        );
-        assert_eq!(registry.lookup(&ctrl_space, When::AgentScreen), None);
-        let f8 = KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE);
-        assert_eq!(
-            registry.lookup(&f8, When::Always),
-            Some(ActionId::VoiceToggle)
-        );
     }
 
     #[test]

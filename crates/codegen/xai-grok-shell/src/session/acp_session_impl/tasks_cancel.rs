@@ -72,8 +72,6 @@ impl AgentTask {
         prompt_id: String,
         input: Vec<ContentBlock>,
         prompt_mode: PromptMode,
-        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
-        artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
         client_identifier: Option<String>,
         screen_mode: Option<String>,
         verbatim: bool,
@@ -90,8 +88,6 @@ impl AgentTask {
                     session.clone(),
                     input,
                     prompt_mode,
-                    trace_gcs_config,
-                    artifact_tracker,
                     client_identifier,
                     screen_mode,
                     verbatim,
@@ -154,8 +150,6 @@ async fn run_task(
     session: Arc<SessionActor>,
     input: Vec<ContentBlock>,
     prompt_mode: PromptMode,
-    trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
-    artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
     client_identifier: Option<String>,
     screen_mode: Option<String>,
     verbatim: bool,
@@ -170,8 +164,6 @@ async fn run_task(
             &prompt_id,
             input,
             prompt_mode,
-            trace_gcs_config,
-            artifact_tracker,
             client_identifier,
             screen_mode,
             verbatim,
@@ -699,11 +691,9 @@ impl SessionActor {
                     total_tokens,
                     turn_snapshot: None,
                     completion_kind: PromptCompletionKind::Cancelled {
-                        // Previously hard-coded `None`, which dropped the
-                        // category on the abort path so `streaming_partial.json`
-                        // recorded a bare `"cancelled"`. Carry `MidTurnAbort`
-                        // so the partial's `reason` and any downstream consumer
-                        // match what `emit_turn_ended` wrote to `events.jsonl`.
+                        // Preserve the cancellation category so the response
+                        // metadata matches what `emit_turn_ended` wrote to
+                        // `events.jsonl`.
                         category: Some(crate::session::events::CancellationCategory::MidTurnAbort),
                         // Thread the trigger on the running turn only (idx 0);
                         // MvpAgent stamps it on the `PromptResponse` `_meta`.

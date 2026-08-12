@@ -1,22 +1,15 @@
-//! [`WorkspaceOps`] — dual-mode workspace operations handle.
+//! [`WorkspaceOps`] — local workspace operations handle.
 //!
-//! Two modes:
-//!
-//! - **`Local`** — extensions dispatch through [`WorkspaceHandle`]; tool
+//! Operations dispatch through [`WorkspaceHandle`]; tool
 //!   calls dispatch through the workspace session's [`FinalizedToolset`].
 //!   The toolset is installed via [`WorkspaceOps::bind_local_session`]
 //!   after the agent is built.
-//!
-//! - **`Proxy`** — everything routes through hub WebSocket to a remote
-//!   workspace server.
-//!
 //! ## Type safety
 //!
 //! Each RPC method has a corresponding request struct that implements
 //! [`WorkspaceRpc`]. The struct carries a `METHOD` constant and derives
-//! `Serialize + Deserialize`. Both the proxy client (`WorkspaceOps`) and
-//! the server (`WorkspaceRpcHandler::dispatch`) use the same struct —
-//! add/rename a field and the compiler catches both sides.
+//! `Serialize + Deserialize`; the DTOs remain available as compatibility
+//! carriers even though no hosted dispatcher is registered here.
 use crate::error::{WorkspaceError, WorkspaceResult};
 use crate::file_system::ContentSearchRequest;
 use crate::handle::WorkspaceHandle;
@@ -26,10 +19,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use xai_computer_hub_sdk::ToolHarness;
 use xai_grok_tools::types::output::ToolRunResult;
-use xai_grok_workspace_client::{WorkspaceClient, is_transport_fatal};
 pub use xai_grok_workspace_types::rpc::WorkspaceRpc;
 pub use xai_grok_workspace_types::rpc::agents_md::DiscoverAgentsMdReq;
 pub use xai_grok_workspace_types::rpc::code_nav::{
@@ -86,7 +76,7 @@ macro_rules! workspace_rpc {
 }
 /// Typed workspace operation: the wire contract (`METHOD`, `Response`)
 /// comes from the [`WorkspaceRpc`] supertrait; this adds local-mode
-/// `execute()`. In proxy mode the op is serialized through the server RPC.
+/// `execute()`.
 #[async_trait]
 pub trait WorkspaceOp: WorkspaceRpc + DeserializeOwned + Send + Sync {
     /// Execute the operation locally against the workspace handle.
@@ -141,6 +131,112 @@ pub struct GetRewindPointsReq {
 impl WorkspaceRpc for GetRewindPointsReq {
     const METHOD: &'static str = "workspace.get_rewind_points";
     type Response = Vec<crate::session::file_state::RewindPoint>;
+}
+#[async_trait]
+impl WorkspaceOp for WorkspaceInfoReq {
+    async fn execute(
+        &self,
+        ws: &WorkspaceHandle,
+        _session_id: Option<&str>,
+    ) -> WorkspaceResult<Self::Response> {
+        let cwd = ws.root_cwd()?;
+        let shell = std::env::var("SHELL")
+            .ok()
+            .and_then(|value| {
+                std::path::Path::new(&value)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "sh".to_owned());
+        Ok(serde_json::json!({
+            "os": std::env::consts::OS,
+            "shell": shell,
+            "cwd": cwd.to_string_lossy(),
+        }))
+    }
+}
+#[async_trait]
+impl WorkspaceOp for GitStatusReq {
+    async fn execute(
+        &self,
+        ws: &WorkspaceHandle,
+        _session_id: Option<&str>,
+    ) -> WorkspaceResult<Self::Response> {
+        static DEPRECATION_WARNING: std::sync::Once = std::sync::Once::new();
+        DEPRECATION_WARNING.call_once(|| {
+            tracing::warn!(
+                "workspace.git_status is deprecated; use workspace.git_status_ext with prompt format"
+            );
+        });
+        let result = crate::file_system::git_status(ws.root_cwd()?)
+            .await
+            .map_err(|error| WorkspaceError::HubError(error.to_string()))?;
+        Ok(Value::String(result))
+    }
+}
+#[async_trait]
+impl WorkspaceOp for BeginPromptReq {
+    async fn execute(
+        &self,
+        ws: &WorkspaceHandle,
+        _session_id: Option<&str>,
+    ) -> WorkspaceResult<Self::Response> {
+        ws.session(&self.session_id)
+            .ok_or_else(|| WorkspaceError::SessionNotFound(self.session_id.clone()))?;
+        ws.on_turn_boundary(
+            &self.session_id,
+            crate::session::checkpoint::TurnBoundary::rewind_begin(self.prompt_index),
+        )
+        .await;
+        Ok(())
+    }
+}
+#[async_trait]
+impl WorkspaceOp for EndPromptReq {
+    async fn execute(
+        &self,
+        ws: &WorkspaceHandle,
+        _session_id: Option<&str>,
+    ) -> WorkspaceResult<Self::Response> {
+        ws.session(&self.session_id)
+            .ok_or_else(|| WorkspaceError::SessionNotFound(self.session_id.clone()))?;
+        ws.on_turn_boundary(
+            &self.session_id,
+            crate::session::checkpoint::TurnBoundary::rewind_finalize(self.prompt_index),
+        )
+        .await;
+        Ok(())
+    }
+}
+#[async_trait]
+impl WorkspaceOp for GetRewindPointsReq {
+    async fn execute(
+        &self,
+        ws: &WorkspaceHandle,
+        _session_id: Option<&str>,
+    ) -> WorkspaceResult<Self::Response> {
+        let session = ws
+            .session(&self.session_id)
+            .ok_or_else(|| WorkspaceError::SessionNotFound(self.session_id.clone()))?;
+        Ok(session
+            .file_state_tracker()
+            .get_rewind_points_normalized(session.cwd())
+            .await)
+    }
+}
+#[async_trait]
+impl WorkspaceOp for RewindToReq {
+    async fn execute(
+        &self,
+        ws: &WorkspaceHandle,
+        _session_id: Option<&str>,
+    ) -> WorkspaceResult<Self::Response> {
+        ws.session(&self.session_id)
+            .ok_or_else(|| WorkspaceError::SessionNotFound(self.session_id.clone()))?;
+        Ok(ws
+            .rewind_to(&self.session_id, self.target_prompt_index)
+            .await)
+    }
 }
 fn hunk_line_info_to_wire(info: &xai_hunk_tracker::types::HunkLineInfo) -> HunkLineInfoWire {
     HunkLineInfoWire {
@@ -1293,23 +1389,18 @@ impl WorkspaceOp for WorktreeDbStatsReq {
         serde_json::to_value(stats).map_err(|e| WorkspaceError::HubError(e.to_string()))
     }
 }
-/// Dual-mode workspace operations handle.
+/// Local in-process workspace operations handle.
 ///
 /// - **`Local`** — wraps a [`WorkspaceHandle`]. Extensions dispatch
 ///   through the handle; tool calls dispatch through the workspace
 ///   session's [`FinalizedToolset`](xai_grok_tools::registry::types::FinalizedToolset).
 ///   Call [`bind_local_session`](Self::bind_local_session) after building
 ///   the agent to install the toolset on the workspace session.
-///
-/// - **`Proxy`** — wraps a [`WorkspaceClient`] connected to a remote hub.
-///   Everything routes through hub WebSocket to a remote workspace server.
 #[derive(Clone)]
 pub enum WorkspaceOps {
     /// Local in-process mode — extensions through the handle, tool calls
     /// through the workspace session's toolset.
     Local { handle: WorkspaceHandle },
-    /// Proxy mode — routes through hub RPC.
-    Proxy { client: WorkspaceClient },
 }
 impl WorkspaceOps {
     /// Construct a local-mode ops handle.
@@ -1320,36 +1411,10 @@ impl WorkspaceOps {
     pub fn local(handle: WorkspaceHandle) -> Self {
         Self::Local { handle }
     }
-    /// Construct a proxy-mode ops handle.
-    pub fn proxy(harness: Arc<ToolHarness>) -> Self {
-        Self::Proxy {
-            client: WorkspaceClient::new((*harness).clone()),
-        }
-    }
-    /// Construct a proxy-mode ops handle sharing a pre-created connected
-    /// flag. The same `Arc<AtomicBool>` should be wired into the harness
-    /// builder's `on_reconnect` callback so reconnects reset the flag.
-    pub fn proxy_with_connected(harness: Arc<ToolHarness>, connected: Arc<AtomicBool>) -> Self {
-        Self::Proxy {
-            client: WorkspaceClient::with_connected_flag((*harness).clone(), connected),
-        }
-    }
-    /// Whether this handle routes through the server (proxy mode).
-    pub fn is_proxy(&self) -> bool {
-        matches!(self, Self::Proxy { .. })
-    }
-    /// Access the underlying workspace RPC client (proxy mode only).
-    pub fn client(&self) -> Option<&WorkspaceClient> {
-        match self {
-            Self::Proxy { client } => Some(client),
-            Self::Local { .. } => None,
-        }
-    }
     /// Access the underlying workspace handle (local mode only).
     pub fn workspace_handle(&self) -> Option<&WorkspaceHandle> {
         match self {
             Self::Local { handle } => Some(handle),
-            Self::Proxy { .. } => None,
         }
     }
     /// Create the workspace session and bind the agent's toolset for local mode.
@@ -1366,7 +1431,6 @@ impl WorkspaceOps {
     /// `drop_session`/evict cancel — deliberately never adopted from the
     /// external toolset, or teardown would SIGKILL a backend the shell shares.
     ///
-    /// No-op in proxy mode (the workspace server owns sessions).
     pub fn bind_local_session(
         &self,
         session_id: &str,
@@ -1395,7 +1459,7 @@ impl WorkspaceOps {
         session.replace(session.effective_tool_config(), toolset);
         Ok(())
     }
-    /// Release the workspace session. No-op in proxy mode.
+    /// Release the workspace session.
     pub fn end_local_session(&self, session_id: &str) {
         let Self::Local { handle } = self else {
             return;
@@ -1410,87 +1474,39 @@ impl WorkspaceOps {
         session_id: &str,
         payload: &xai_tool_protocol::turn_hook::BeforeTurnPayload,
     ) {
-        match self {
-            Self::Local { handle } => {
-                handle.on_before_turn(session_id, payload).await;
-            }
-            Self::Proxy { .. } => {
-                tracing::debug!("on_before_turn called on Proxy WorkspaceOps (no-op)");
-            }
-        }
+        let Self::Local { handle } = self;
+        handle.on_before_turn(session_id, payload).await;
     }
     pub async fn on_after_turn(
         &self,
         session_id: &str,
         payload: &xai_tool_protocol::turn_hook::AfterTurnPayload,
     ) {
-        match self {
-            Self::Local { handle } => {
-                handle.on_after_turn(session_id, payload).await;
-            }
-            Self::Proxy { .. } => {
-                tracing::debug!("on_after_turn called on Proxy WorkspaceOps (no-op)");
-            }
-        }
+        let Self::Local { handle } = self;
+        handle.on_after_turn(session_id, payload).await;
     }
-    pub async fn rpc_raw(&self, method: &str, params: Value) -> WorkspaceResult<Value> {
-        let client = match self {
-            Self::Proxy { client } => client,
-            Self::Local { .. } => {
-                return Err(WorkspaceError::HubError(
-                    "rpc not available in local mode".into(),
-                ));
-            }
-        };
-        client
-            .rpc_raw(method, params)
-            .await
-            .map_err(|e| WorkspaceError::HubError(e.to_string()))
-    }
-    async fn rpc<R: WorkspaceRpc>(&self, req: &R) -> WorkspaceResult<R::Response> {
-        let params = serde_json::to_value(req)
-            .map_err(|e| WorkspaceError::HubError(format!("serialize failed: {e}")))?;
-        let terminal = self.rpc_raw(R::METHOD, params).await?;
-        let envelope: crate::rpc_envelope::RpcEnvelope<R::Response> =
-            serde_json::from_value(terminal)
-                .map_err(|e| WorkspaceError::HubError(format!("envelope parse failed: {e}")))?;
-        envelope
-            .into_result()
-            .map_err(crate::rpc_envelope::rpc_error_to_workspace)
-    }
-    /// Dispatch a typed operation in either local or proxy mode.
-    ///
-    /// - **Local mode**: calls `op.execute(handle, session_id)` directly.
-    /// - **Proxy mode**: serializes the op and routes through the server RPC.
-    ///   The server handler owns session context, so `session_id` is only
-    ///   needed for local `execute()`.
+    /// Dispatch a typed operation against the local workspace.
     pub async fn dispatch<Op: WorkspaceOp>(
         &self,
         op: &Op,
         session_id: Option<&str>,
     ) -> WorkspaceResult<Op::Response> {
-        let mode = match self {
-            Self::Local { .. } => "local",
-            Self::Proxy { .. } => "proxy",
-        };
-        tracing::debug!(method = Op::METHOD, mode, "WorkspaceOps::dispatch");
-        match self {
-            Self::Local { handle } => op.execute(handle, session_id).await,
-            Self::Proxy { .. } => self.rpc(op).await,
-        }
+        let Self::Local { handle } = self;
+        tracing::debug!(method = Op::METHOD, "WorkspaceOps::dispatch");
+        op.execute(handle, session_id).await
     }
     pub async fn workspace_info(&self) -> WorkspaceResult<Value> {
-        self.rpc(&WorkspaceInfoReq {}).await
+        self.dispatch(&WorkspaceInfoReq {}, None).await
     }
     /// **DEPRECATED**: Use [`Self::git_status_ext`] with `format: GitStatusFormat::Prompt`
     /// instead. This method will be removed in a future release.
     pub async fn git_status(&self) -> WorkspaceResult<Value> {
-        self.rpc(&GitStatusReq {}).await
+        self.dispatch(&GitStatusReq {}, None).await
     }
     /// Get git status with configurable output format.
     ///
     /// `GitStatusExtReq` implements `WorkspaceOp`, so this is dispatched
-    /// (local execute or proxy RPC) rather than being proxy-only.
+    /// through the local workspace handle.
     ///
     /// Use `format: GitStatusFormat::Prompt` for compact JSON string output
     /// (the replacement for the deprecated `git_status()` method).
@@ -1511,26 +1527,35 @@ impl WorkspaceOps {
         wire_to_hook_registry(&wire)
     }
     pub async fn begin_prompt(&self, session_id: &str, prompt_index: usize) -> WorkspaceResult<()> {
-        self.rpc(&BeginPromptReq {
-            session_id: session_id.to_owned(),
-            prompt_index,
-        })
+        self.dispatch(
+            &BeginPromptReq {
+                session_id: session_id.to_owned(),
+                prompt_index,
+            },
+            None,
+        )
         .await
     }
     pub async fn end_prompt(&self, session_id: &str, prompt_index: usize) -> WorkspaceResult<()> {
-        self.rpc(&EndPromptReq {
-            session_id: session_id.to_owned(),
-            prompt_index,
-        })
+        self.dispatch(
+            &EndPromptReq {
+                session_id: session_id.to_owned(),
+                prompt_index,
+            },
+            None,
+        )
         .await
     }
     pub async fn get_rewind_points(
         &self,
         session_id: &str,
     ) -> WorkspaceResult<Vec<crate::session::file_state::RewindPoint>> {
-        self.rpc(&GetRewindPointsReq {
-            session_id: session_id.to_owned(),
-        })
+        self.dispatch(
+            &GetRewindPointsReq {
+                session_id: session_id.to_owned(),
+            },
+            None,
+        )
         .await
     }
     pub async fn rewind_to(
@@ -1538,10 +1563,13 @@ impl WorkspaceOps {
         session_id: &str,
         target_prompt_index: usize,
     ) -> WorkspaceResult<crate::session::file_state::FileRewindResponse> {
-        self.rpc(&RewindToReq {
-            session_id: session_id.to_owned(),
-            target_prompt_index,
-        })
+        self.dispatch(
+            &RewindToReq {
+                session_id: session_id.to_owned(),
+                target_prompt_index,
+            },
+            None,
+        )
         .await
     }
     pub async fn put_files(&self, req: PutFilesReq) -> WorkspaceResult<PutFilesRes> {
@@ -1555,7 +1583,6 @@ impl WorkspaceOps {
     /// - **Local**: dispatches through the workspace session's
     ///   [`FinalizedToolset`](xai_grok_tools::registry::types::FinalizedToolset)
     ///   (in-process). Requires `session_id` to look up the session.
-    /// - **Proxy**: routes through the server `ToolHarness` (remote).
     pub async fn call_tool(
         &self,
         name: &str,
@@ -1581,37 +1608,6 @@ impl WorkspaceOps {
                     )
                 })?;
                 session.toolset().call(name, args, call_id, None).await
-            }
-            Self::Proxy { client } => {
-                if !client.is_connected() {
-                    return Err(xai_tool_runtime::ToolError::network_error(
-                        "The workspace server connection was lost. \
-                         Please restart your session to reconnect.",
-                    ));
-                }
-                let tool_id = xai_tool_protocol::ToolId::new(name).map_err(|e| {
-                    xai_tool_runtime::ToolError::custom(
-                        "hub_proxy_error",
-                        format!("invalid tool name: {e}"),
-                    )
-                })?;
-                let mut ctx = xai_tool_runtime::ToolCallContext::default();
-                ctx.call_id =
-                    xai_tool_protocol::ToolCallId::new(call_id.to_owned()).unwrap_or(ctx.call_id);
-                let mut stream = client.harness().call(tool_id, args, ctx).await;
-                let typed = crate::hub_channel::consume_stream_terminal(&mut stream)
-                    .await
-                    .inspect_err(|e| {
-                        if is_transport_fatal(e) {
-                            client.mark_disconnected();
-                        }
-                    })?;
-                serde_json::from_value::<ToolRunResult>(typed.value).map_err(|e| {
-                    xai_tool_runtime::ToolError::custom(
-                        "tool_result_deserialize",
-                        format!("tool result deserialization failed: {e}"),
-                    )
-                })
             }
         }
     }

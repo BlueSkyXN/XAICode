@@ -1,4 +1,4 @@
-//! `/doctor` — diagnose terminal, color/theme, clipboard, and voice input.
+//! `/doctor` — diagnose terminal, color/theme, and clipboard.
 //!
 //! Runs the shared TUI probe and diagnostics path, including live runtime
 //! evidence that the standalone command cannot observe.

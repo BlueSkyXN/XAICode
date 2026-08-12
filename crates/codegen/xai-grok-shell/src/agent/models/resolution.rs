@@ -122,24 +122,6 @@ pub(crate) fn resolve_default_model(
                         "remote default_model not in available models, skipping"
                     );
                 }
-                let campaign_pref_missing = cfg.models.default_is_campaign_driven
-                    && matches!(pref.source, config::ConfigSource::Config);
-                if campaign_pref_missing
-                    && let Some(prev) = cfg
-                        .models
-                        .pre_campaign_default
-                        .as_deref()
-                        .filter(|s| !s.is_empty())
-                    && let Some((key, entry)) = visible
-                        .get_key_value(prev)
-                        .or_else(|| visible.iter().find(|(_, m)| m.model == prev))
-                {
-                    tracing::info!(
-                        unavailable = %pref.value, fallback = %prev,
-                        "campaign-driven default unavailable in catalog; recovering the pre-campaign default"
-                    );
-                    return (key.clone(), entry.clone(), config::ConfigSource::Config);
-                }
                 let (key, first) = first_or_fallback();
                 (key, first, config::ConfigSource::Default)
             }

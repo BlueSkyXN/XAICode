@@ -808,8 +808,8 @@ impl AcpPrompter {
         };
 
         let outcome = match &self.hub_permission {
-            // Route the prompt to chat over the server (see
-            // `ToolServerPermissionTransport` for the await/release contract).
+            // A transport slot remains in the compatibility shape; hosted
+            // routing is disabled, so local prompts use the ACP gateway below.
             Some(transport) => {
                 crate::permission::hub_permission::request_permission_via_hub(
                     transport.as_ref(),

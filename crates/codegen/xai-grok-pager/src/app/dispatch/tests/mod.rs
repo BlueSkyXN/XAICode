@@ -1,10 +1,5 @@
 //! Tests for the dispatch module tree: shared fixtures and per-domain test modules.
 mod auth;
-// The upstream billing/paywall suite exercises removed hosted surfaces.
-// Keep the source file for historical reference, but do not compile those
-// tests in the clean local build; local `/usage` coverage lives in `status`.
-#[cfg(any())]
-mod billing;
 mod cta_e2e;
 mod dashboard;
 mod jump;
@@ -20,11 +15,6 @@ mod status;
 mod task_result;
 mod transcript;
 mod turn;
-mod voice;
-use super::billing::{
-    CreditLimitUpsellMode, credit_limit_upsell_mode, is_max_tier, open_credit_limit_upsell,
-    open_free_usage_upsell,
-};
 use super::cta::{
     CTA_MCP_ABSENT_MAX_ATTEMPTS, CTA_MCP_POLL_MAX_ATTEMPTS, cta_impression_plugin_name,
     cta_install_error_category, cta_install_relative_path, plugin_cta_phase_for,
@@ -50,7 +40,7 @@ use super::permissions::drain_permission_queue;
 use super::prompt::{dispatch_doctor, dispatch_send_prompt, dispatch_send_prompt_inner};
 use super::session::fork::build_child_fork_marker;
 use super::session::lifecycle::{dispatch_new_session_inner, drain_startup_actions, finish_trust};
-use super::session::load::{dispatch_load_session_with_restore, reanchor_grouped_selection};
+use super::session::load::reanchor_grouped_selection;
 use super::session::modal::{dispatch_rename_session, dispatch_sessions_confirm_close};
 use super::settings::setters::set_default_model_inner;
 use super::settings::ui::{action_for_reset, apply_setting_rollback};
@@ -63,8 +53,7 @@ use crate::app::actions::{Action, Effect, SubagentKillOutcome, SwitchModelError,
 use crate::app::agent::{AgentId, AgentSession, AgentState};
 use crate::app::agent_view::{ActivePane, AgentView, PromptMode};
 use crate::app::app_view::{
-    ActiveView, AppView, AuthMode, AuthState, TrustState, VoiceState, VoiceTarget,
-    WelcomeAnnouncementState,
+    ActiveView, AppView, AuthMode, AuthState, TrustState, WelcomeAnnouncementState,
 };
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{SessionEvent, ToolCallBlock};
@@ -77,6 +66,7 @@ use std::time::Instant;
 fn test_app() -> AppView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     AppView {
+        pending_startup: None,
         active_view: ActiveView::Welcome,
         auth_return_view: None,
         agents: IndexMap::new(),
@@ -178,12 +168,10 @@ fn test_app() -> AppView {
         zdr_access_enabled: false,
         usage_billing_redirect_url: None,
         access_gate_shown_logged: false,
-        announcement_cta_impressions_logged: Default::default(),
         gate: None,
         subscription_tier: None,
         paywall_check_started: None,
         last_subscription_check_at: None,
-        subscription_watch_interval_secs: None,
         pending_gate_verification: None,
         gate_verify_gen: 0,
         bundle_state: crate::app::bundle::BundleState::default(),
@@ -288,12 +276,6 @@ fn test_app() -> AppView {
         dashboard_persisted: None,
         keyboard_normalizer: crate::input::KeyboardNormalizer::from_terminal_context(),
         has_claude_import: false,
-        voice_mode_enabled: false,
-        voice_ui_active: false,
-        voice_config: xai_grok_voice::VoiceConfig::default(),
-        voice_auth: None,
-        voice_cmd_tx: None,
-        voice_state: VoiceState::Idle,
     }
 }
 /// Build a default `AgentSession` for
@@ -472,7 +454,6 @@ fn cta_mcp_server(
             .unwrap_or_else(|| "local".into()),
         wire_source: McpWireSource::Local,
         plugin_name: plugin.map(str::to_string),
-        is_managed_gateway: false,
     }
 }
 fn arm_reconcile(

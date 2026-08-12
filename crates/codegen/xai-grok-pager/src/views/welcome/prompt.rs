@@ -50,7 +50,7 @@ pub fn render_prompt(
         height: area.height,
     };
 
-    let result = prompt.draw(buf, inset_area, None, &style, Some(info), None);
+    let result = prompt.draw(buf, inset_area, None, &style, Some(info));
 
     (result.cursor_pos, result.post_flush_escapes.map(Into::into))
 }

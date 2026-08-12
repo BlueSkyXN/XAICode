@@ -1153,7 +1153,6 @@ pub fn render_doc_picker_overlay(
                 badge: "",
                 badge_color: None,
                 collapsible: false,
-                underline_last_desc: false,
             })
         })
         .collect();

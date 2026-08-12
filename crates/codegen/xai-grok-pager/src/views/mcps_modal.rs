@@ -1,15 +1,13 @@
-//! MCP server data types, status enum, response conversion, and section
-//! presentation helpers (labels, description lines, connectors URLs).
+//! MCP server data types, status enum, response conversion, and local/plugin
+//! section presentation helpers.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpWireSource {
-    Managed,
     Local,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpSectionId {
-    Managed,
     Plugin(String),
     Local,
 }
@@ -24,9 +22,6 @@ impl Ord for McpSectionId {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         match (self, other) {
-            (Self::Managed, Self::Managed) => Ordering::Equal,
-            (Self::Managed, _) => Ordering::Less,
-            (_, Self::Managed) => Ordering::Greater,
             (Self::Plugin(a), Self::Plugin(b)) => a.cmp(b),
             (Self::Plugin(_), Self::Local) => Ordering::Less,
             (Self::Local, Self::Plugin(_)) => Ordering::Greater,
@@ -38,7 +33,6 @@ impl Ord for McpSectionId {
 /// Collapse/expand key for a section header row in the MCP servers tab.
 pub fn section_key(section: &McpSectionId) -> String {
     match section {
-        McpSectionId::Managed => "mcp-section:managed".into(),
         McpSectionId::Plugin(name) => format!("mcp-section:plugin:{name}"),
         McpSectionId::Local => "mcp-section:local".into(),
     }
@@ -47,45 +41,23 @@ pub fn section_key(section: &McpSectionId) -> String {
 /// Display label for a section header.
 pub fn section_label(section: &McpSectionId, count: usize) -> String {
     match section {
-        McpSectionId::Managed => format!("Managed ({count})"),
         McpSectionId::Plugin(name) => format!("Plugin: {name} ({count})"),
         McpSectionId::Local => format!("Local ({count})"),
     }
 }
 
-/// Hosted connector management is not available in the local build.
-pub const MANAGED_SECTION_CONNECTORS_URL: &str = "";
-
-/// Hosted connector deep links are removed; the return value stays for
-/// compatibility with existing modal layout code.
-pub fn managed_connectors_url(_team_id: Option<&str>) -> String {
-    String::new()
-}
-
-/// Display form of [`managed_connectors_url`] with the `https://` scheme dropped.
-///
-/// Kept for compatibility with the existing modal layout.
-pub fn managed_connectors_url_display(team_id: Option<&str>) -> String {
-    let url = managed_connectors_url(team_id);
-    url.strip_prefix("https://").unwrap_or(&url).to_string()
-}
-
-/// Description lines shown under the Managed section header (when expanded).
-/// No hosted connector description is rendered in the clean build.
+/// Description lines shown under a section header (when expanded).
 pub fn section_description_lines(section: &McpSectionId, _team_id: Option<&str>) -> Vec<String> {
     match section {
-        McpSectionId::Managed => vec![],
         McpSectionId::Plugin(_) | McpSectionId::Local => vec![],
     }
 }
 
 /// Classify a server into a UI section.
 ///
-/// Managed wire source → Managed; plugin label → Plugin; else Local.
+/// Plugin label → Plugin; otherwise Local.
 pub fn section_for(server: &McpServerInfo) -> McpSectionId {
-    if server.wire_source == McpWireSource::Managed {
-        McpSectionId::Managed
-    } else if let Some(ref name) = server.plugin_name {
+    if let Some(ref name) = server.plugin_name {
         McpSectionId::Plugin(name.clone())
     } else {
         McpSectionId::Local
@@ -98,10 +70,8 @@ pub fn is_removable(server: &McpServerInfo) -> bool {
 }
 
 fn parse_wire_source(raw: Option<&str>) -> McpWireSource {
-    match raw {
-        Some("managed") => McpWireSource::Managed,
-        _ => McpWireSource::Local,
-    }
+    let _ = raw;
+    McpWireSource::Local
 }
 
 fn parse_plugin_name(source_label: &str) -> Option<String> {
@@ -206,7 +176,6 @@ pub struct McpServerInfo {
     pub wire_source: McpWireSource,
     /// Plugin name parsed from `source_label` (`"plugin: …"`).
     pub plugin_name: Option<String>,
-    pub is_managed_gateway: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -298,8 +267,6 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
                 };
             let wire_source = parse_wire_source(entry.source.as_deref());
             let plugin_name = entry.source_label.as_deref().and_then(parse_plugin_name);
-            let is_managed_gateway = entry.name.starts_with("managed_gateway:")
-                || entry.config_type.as_deref() == Some("managedGateway");
             let source = entry
                 .source_label
                 .or(entry.source)
@@ -323,17 +290,15 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
                 source,
                 wire_source,
                 plugin_name,
-                is_managed_gateway,
             }
         })
         .collect::<Vec<_>>();
 
-    // Stable sort: managed before plugin/local, then alphabetical by name.
+    // Stable sort: plugin/local, then alphabetical by name.
     servers.sort_by(|a, b| {
         let source_rank = |s: &McpServerInfo| match section_for(s) {
-            McpSectionId::Managed => 0,
-            McpSectionId::Plugin(_) => 1,
-            McpSectionId::Local => 2,
+            McpSectionId::Plugin(_) => 0,
+            McpSectionId::Local => 1,
         };
         source_rank(a)
             .cmp(&source_rank(b))
@@ -401,7 +366,6 @@ mod tests {
             source: "local".to_string(),
             wire_source: McpWireSource::Local,
             plugin_name: None,
-            is_managed_gateway: false,
         }
     }
 
@@ -443,38 +407,14 @@ mod tests {
     }
 
     #[test]
-    fn section_description_lines_managed_is_empty_in_clean_build() {
-        let lines = section_description_lines(&McpSectionId::Managed, None);
-        assert!(lines.is_empty());
-        assert!(section_description_lines(&McpSectionId::Managed, Some("team-1")).is_empty());
-    }
-
-    #[test]
-    fn managed_connectors_url_display_strips_scheme() {
-        assert_eq!(managed_connectors_url_display(None), "");
-        assert_eq!(managed_connectors_url_display(Some("team-uuid-1")), "");
-    }
-
-    #[test]
-    fn managed_connectors_url_appends_team_id_when_present() {
-        assert_eq!(managed_connectors_url(None), "");
-        assert_eq!(managed_connectors_url(Some("")), "");
-        assert_eq!(managed_connectors_url(Some("team-uuid-1")), "");
-    }
-
-    #[test]
     fn section_description_lines_local_is_empty() {
         assert!(section_description_lines(&McpSectionId::Local, None).is_empty());
     }
 
     #[test]
-    fn section_for_grok_com_with_plugin_label_is_managed() {
-        let server = server_from_wire(
-            "grok_com_linear",
-            Some("managed"),
-            Some("plugin: my-plugin"),
-        );
-        assert_eq!(section_for(&server), McpSectionId::Managed);
+    fn section_for_grok_com_local_name_is_local() {
+        let server = server_from_wire("grok_com_linear", Some("local"), None);
+        assert_eq!(section_for(&server), McpSectionId::Local);
     }
 
     #[test]
@@ -493,15 +433,9 @@ mod tests {
     }
 
     #[test]
-    fn is_removable_rejects_managed_wire_source() {
-        let server = server_from_wire("custom", Some("managed"), None);
-        assert!(!is_removable(&server));
-    }
-
-    #[test]
-    fn is_removable_rejects_grok_com_prefix() {
+    fn is_removable_allows_grok_com_local_name() {
         let server = server_from_wire("grok_com_slack", Some("local"), None);
-        assert!(!is_removable(&server));
+        assert!(is_removable(&server));
     }
 
     #[test]
@@ -510,63 +444,6 @@ mod tests {
         assert_eq!(server.wire_source, McpWireSource::Local);
         assert_eq!(server.plugin_name.as_deref(), Some("example"));
         assert_eq!(server.source, "plugin: example");
-    }
-
-    #[test]
-    fn convert_list_response_classifies_managed_gateway_only_for_gateway_rows() {
-        let gateway = server_from_wire_with_type(
-            "managed_gateway:linear",
-            Some("managed"),
-            None,
-            Some("managedGateway"),
-        );
-        assert!(gateway.is_managed_gateway);
-
-        let legacy_managed = server_from_wire("grok_com_slack", Some("managed"), None);
-        assert!(!legacy_managed.is_managed_gateway);
-    }
-
-    #[test]
-    fn gateway_row_uses_managed_section_not_local_uninstall() {
-        let gateway = server_from_wire_with_type(
-            "managed_gateway:linear",
-            Some("managed"),
-            None,
-            Some("managedGateway"),
-        );
-        assert_eq!(section_for(&gateway), McpSectionId::Managed);
-        assert!(!is_removable(&gateway));
-    }
-
-    #[test]
-    fn convert_list_response_orders_gateway_rows_by_display_name() {
-        fn gateway_entry(name: &str, display_name: &str) -> McpsServerEntry {
-            McpsServerEntry {
-                name: name.to_string(),
-                display_name: Some(display_name.to_string()),
-                source: Some("managed".to_string()),
-                source_label: None,
-                config_type: Some("managedGateway".to_string()),
-                setup: None,
-                setup_values: None,
-                session: Some(McpsServerSession {
-                    enabled: true,
-                    status: Some("ready".to_string()),
-                    tools: vec![],
-                    auth_required: false,
-                    setup_required: false,
-                }),
-            }
-        }
-        let servers = convert_list_response(McpsListResponse {
-            servers: vec![
-                gateway_entry("managed_gateway:zeta", "Alpha"),
-                gateway_entry("managed_gateway:alpha", "Zeta"),
-            ],
-        });
-        assert_eq!(servers[0].display_name.as_deref(), Some("Alpha"));
-        assert_eq!(servers[0].name, "managed_gateway:zeta");
-        assert_eq!(servers[1].display_name.as_deref(), Some("Zeta"));
     }
 
     #[test]
@@ -679,7 +556,6 @@ mod tests {
             source: "local".into(),
             wire_source: McpWireSource::Local,
             plugin_name: None,
-            is_managed_gateway: false,
         }];
         let mutated = patch_server_row(
             &mut servers,

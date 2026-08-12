@@ -16,7 +16,6 @@ use xai_grok_test_support::{MockInferenceServer, TestSandbox};
 
 pub use xai_grok_test_support::mock_server::LogEntry;
 pub use xai_grok_test_support::mock_server::MockModelEntry as MockModel;
-pub use xai_grok_test_support::mock_server::StorageUpload;
 pub use xai_grok_test_support::sse;
 pub use xai_grok_test_support::{
     InferenceEndpoint, InferenceExpectation, InferenceRequestMatcher, ScriptedResponse, SseEvent,
@@ -294,23 +293,6 @@ impl ContentController {
 
     pub fn request_bodies(&self) -> Vec<serde_json::Value> {
         self.server.request_bodies()
-    }
-
-    // ── Mock storage controls (park-on-401 e2e) ────────────────────────────
-
-    /// Flip the mock `/v1/storage` 401 gate (the auth-outage window).
-    pub fn set_storage_unauthorized(&self, unauthorized: bool) {
-        self.server.set_storage_unauthorized(unauthorized);
-    }
-
-    /// Total `/v1/storage` upload attempts, including 401-rejected ones.
-    pub fn storage_request_count(&self) -> u32 {
-        self.server.storage_request_count()
-    }
-
-    /// Snapshot of accepted (HTTP 200) `/v1/storage` uploads.
-    pub fn storage_uploads(&self) -> Vec<StorageUpload> {
-        self.server.storage_uploads()
     }
 }
 

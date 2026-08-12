@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! key press
-//!   → overlays / modals / dropdowns / voice / search / selection steal Esc first
+//!   → overlays / modals / dropdowns / search / selection steal Esc first
 //!   → 1. pane level (exact context match):
 //!       prompt focused:
 //!         prompt.handle_key(key) → Submit / Edited / Ignored
@@ -247,22 +247,6 @@ mod mcp_init_progress_tests {
         };
         assert!(!expired.is_visible(), "expired seed must not be visible");
     }
-}
-/// Current voice record-dot pulse: `(filled, brightness)`.
-///
-/// A smooth sine "breathing" on a fixed ~0.7s wall-clock period (not the
-/// animation tick), so the dot animates like a studio recording light and
-/// never speeds up or syncs with streaming-text redraws. `filled` picks the
-/// FISHEYE/BULLSEYE glyph; `brightness` (0.4–1.0) fades the red color.
-fn record_dot_pulse() -> (bool, f32) {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static EPOCH: OnceLock<Instant> = OnceLock::new();
-    let epoch = EPOCH.get_or_init(Instant::now);
-    let phase = (epoch.elapsed().as_secs_f32() / 0.7).fract();
-    let s = (phase * std::f32::consts::TAU).sin();
-    let brightness = 0.4 + 0.6 * (0.5 + 0.5 * s);
-    (s >= 0.0, brightness)
 }
 /// A clickable/hoverable screen region.
 ///
@@ -844,6 +828,11 @@ pub struct AgentView {
     /// drop log to one `warn!` per incident (a late replay is one line per
     /// event — thousands for a large transcript).
     pub(crate) unexpected_replay_drops: u32,
+    /// After `SessionLoaded` clears `loading_replay`, keep accepting this-session
+    /// `isReplay` until this instant (or the first this-session live update).
+    /// The load barrier may release on an Unrelated firehose timeout while
+    /// remaining replay still sits behind the ACP peek.
+    pub(crate) late_replay_until: Option<std::time::Instant>,
     /// Prompt ids whose durable `TurnCompleted` terminal arrived during THIS
     /// load's replay window (`loading_replay`). The running turn is not adopted
     /// until replay finishes, so a terminal seen mid-replay can't be finalized
@@ -891,9 +880,7 @@ pub struct AgentView {
     /// Stashed normal prompt state while editing a queued prompt.
     /// Restored when editing ends.
     pub stashed_prompt: Option<StashedPrompt>,
-    /// Complete prompt stashed from a credit-limit-blocked turn. Used by
-    /// `CreditLimitRecheckComplete` to retry the prompt after a tier
-    /// upgrade instead of showing a stale upsell.
+    /// Complete prompt stashed while a prompt is deferred for an access check.
     pub credit_limit_stashed_prompt: Option<crate::app::agent::InFlightPrompt>,
     /// Complete prompt stashed from a turn that failed because the login
     /// expired (401 / re-auth). Used by the `AuthComplete` handler to
@@ -1153,8 +1140,6 @@ pub struct AgentView {
     /// (click opens its link; nulled under dropdowns / occluders like the
     /// banner CTA).
     pub hit_upgrade_cta: HitArea,
-    /// Stop button in the voice record indicator row (`[stop]`), far right.
-    pub hit_voice_stop_button: HitArea,
     /// Scrollbar track for the scrollback pane (for click-to-jump / drag).
     pub hit_scrollbar: HitArea,
     /// Whether a scrollbar drag is in progress on the scrollback scrollbar.
@@ -1750,37 +1735,12 @@ fn translate_local_submit(
             })
         }
         LocalQuestionKind::CreditLimitUpsell { choices } => {
-            let q = qv.questions.first();
-            let url = q
-                .and_then(|q| q.options.get(*idx))
-                .and_then(|o| o.id.as_deref())
-                .unwrap_or(super::dispatch::UPSELL_URL_PAYG);
-            let choice = choices
-                .get(*idx)
-                .copied()
-                .unwrap_or(xai_grok_telemetry::events::CreditLimitChoice::PayAsYouGo);
-            xai_grok_telemetry::session_ctx::log_event(
-                xai_grok_telemetry::events::CreditLimitUpsellClicked {
-                    surface: xai_grok_telemetry::events::CreditLimitUpsellSurface::QuestionModal,
-                    choice,
-                },
-            );
-            InputOutcome::Action(Action::OpenUrl(url.to_string()))
+            let _ = (qv, choices, idx);
+            InputOutcome::Changed
         }
         LocalQuestionKind::FreeUsageUpsell { source } => {
-            let url = qv
-                .questions
-                .first()
-                .and_then(|q| q.options.get(*idx))
-                .and_then(|o| o.id.as_deref())
-                .unwrap_or(super::dispatch::UPSELL_URL_UPGRADE);
-            xai_grok_telemetry::session_ctx::log_event(
-                xai_grok_telemetry::events::SuperGrokUpsellClicked {
-                    source,
-                    auth_method: None,
-                },
-            );
-            InputOutcome::Action(Action::OpenUrl(url.to_string()))
+            let _ = (qv, source, idx);
+            InputOutcome::Changed
         }
         LocalQuestionKind::AgentTypeMismatch { model_id, effort } => {
             let start_new = *idx == 0;
@@ -2094,13 +2054,6 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::ToggleYolo => return None,
         ActionId::ToggleMultiline => return None,
         ActionId::InterjectPrompt => return None,
-        ActionId::EnableVoiceMode => Action::EnableVoiceMode,
-        ActionId::VoiceToggle => {
-            if !crate::app::voice_keybind_enabled() {
-                return None;
-            }
-            Action::VoiceToggle
-        }
         ActionId::ShortcutsHelp => return None,
         ActionId::OpenSettings => return None,
         ActionId::ToggleTodos
@@ -3525,25 +3478,6 @@ mod dropdown_chrome_tests {
                 );
             }
         }
-    }
-}
-#[cfg(test)]
-mod voice_keybind_gate_tests {
-    use super::*;
-    /// The per-pane chord route drops `VoiceToggle` while the Voice shortcut
-    /// setting is off (the event-loop intercept skips the chord in that state,
-    /// so this route is what would otherwise leak it through).
-    #[test]
-    fn resolve_action_honors_voice_keybind_gate() {
-        let prev = crate::app::voice_keybind_enabled();
-        crate::app::set_voice_keybind_enabled_for_test(false);
-        assert!(resolve_action(Some(ActionId::VoiceToggle)).is_none());
-        crate::app::set_voice_keybind_enabled_for_test(true);
-        assert!(matches!(
-            resolve_action(Some(ActionId::VoiceToggle)),
-            Some(InputOutcome::Action(Action::VoiceToggle))
-        ));
-        crate::app::set_voice_keybind_enabled_for_test(prev);
     }
 }
 #[cfg(test)]

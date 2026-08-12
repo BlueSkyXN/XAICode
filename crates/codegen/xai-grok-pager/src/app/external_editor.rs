@@ -13,8 +13,6 @@ use crate::scrollback::block::RenderBlock;
 const PROMPT_EDITOR_MAX_BYTES: u64 = 4 * 1024 * 1024;
 pub(crate) const ATTACHMENT_MESSAGE: &str =
     "External prompt editing is not available while the draft has attachments.";
-pub(crate) const VOICE_MESSAGE: &str =
-    "External prompt editing is not available while voice input is active.";
 pub(crate) const PASTE_MESSAGE: &str =
     "External prompt editing is not available while a paste is still being processed.";
 pub(crate) const OWNERSHIP_MESSAGE: &str =
@@ -152,24 +150,18 @@ fn revalidate(app: &mut AppView, request: PendingEditorRequest) -> Option<Pendin
         .agents
         .get(&agent_id)
         .map(|agent| agent.external_prompt_editor_access(true));
-    let message = if app.voice_recording_target()
-        == Some(crate::app::app_view::VoiceTarget::Agent(agent_id))
-    {
-        Some(VOICE_MESSAGE)
-    } else {
-        match access {
-            Some(crate::app::agent_view::ExternalPromptEditorAccess::Ready) => None,
-            Some(crate::app::agent_view::ExternalPromptEditorAccess::Attachments) => {
-                Some(ATTACHMENT_MESSAGE)
-            }
-            Some(crate::app::agent_view::ExternalPromptEditorAccess::PastePending) => {
-                Some(PASTE_MESSAGE)
-            }
-            Some(crate::app::agent_view::ExternalPromptEditorAccess::OwnedElsewhere) => {
-                Some(OWNERSHIP_MESSAGE)
-            }
-            None => return None,
+    let message = match access {
+        Some(crate::app::agent_view::ExternalPromptEditorAccess::Ready) => None,
+        Some(crate::app::agent_view::ExternalPromptEditorAccess::Attachments) => {
+            Some(ATTACHMENT_MESSAGE)
         }
+        Some(crate::app::agent_view::ExternalPromptEditorAccess::PastePending) => {
+            Some(PASTE_MESSAGE)
+        }
+        Some(crate::app::agent_view::ExternalPromptEditorAccess::OwnedElsewhere) => {
+            Some(OWNERSHIP_MESSAGE)
+        }
+        None => return None,
     };
     if let Some(message) = message {
         report_prompt_failure(app, agent_id, message);
@@ -479,43 +471,6 @@ mod tests {
                 .scrollback
                 .iter_entries()
                 .any(|(_, entry)| entry.block.searchable_text().as_deref() == Some(message))
-        );
-    }
-
-    #[test]
-    fn revalidation_cancels_after_warm_voice_ownership_change() {
-        let (mut app, request) = app_with_prompt_request();
-        let id = AgentId(0);
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        app.voice_cmd_tx = Some(tx);
-        app.voice_state = crate::app::app_view::VoiceState::Recording {
-            hold: false,
-            target: crate::app::app_view::VoiceTarget::Agent(id),
-            interim: None,
-        };
-        assert!(prepare(&mut app, request).unwrap().is_none());
-        assert!(
-            app.agents[&id]
-                .scrollback
-                .iter_entries()
-                .any(|(_, entry)| entry.block.searchable_text().as_deref() == Some(VOICE_MESSAGE))
-        );
-    }
-
-    #[test]
-    fn revalidation_cancels_after_cold_voice_ownership_change() {
-        let (mut app, request) = app_with_prompt_request();
-        let id = AgentId(0);
-        app.voice_state = crate::app::app_view::VoiceState::ColdStart {
-            hold: false,
-            target: crate::app::app_view::VoiceTarget::Agent(id),
-        };
-        assert!(prepare(&mut app, request).unwrap().is_none());
-        assert!(
-            app.agents[&id]
-                .scrollback
-                .iter_entries()
-                .any(|(_, entry)| entry.block.searchable_text().as_deref() == Some(VOICE_MESSAGE))
         );
     }
 

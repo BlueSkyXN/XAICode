@@ -1309,7 +1309,6 @@ impl AgentView {
                         badge: "",
                         badge_color: None,
                         collapsible: false,
-                        underline_last_desc: false,
                         fields: &[],
                         description_lines: &[],
                         summary_lines: &[],
@@ -1799,7 +1798,6 @@ impl AgentView {
                                 badge: "",
                                 badge_color: None,
                                 collapsible: false,
-                                underline_last_desc: false,
                             })
                         }
                     })
@@ -1871,7 +1869,6 @@ impl AgentView {
                             badge: "",
                             badge_color: None,
                             collapsible: false,
-                            underline_last_desc: false,
                         })
                     })
                     .collect();
@@ -2162,7 +2159,6 @@ impl AgentView {
                             badge: if has_snippet { "match" } else { "" },
                             badge_color: Some(theme.accent_user),
                             collapsible: true,
-                            underline_last_desc: false,
                         }));
                         non_sel_flags.push(false);
                     }
@@ -2410,14 +2406,7 @@ impl AgentView {
                     );
                 }
             } else if let modal::ActiveModal::UsageInfo { state } = active_modal {
-                crate::views::usage_modal::render_usage_modal(
-                    buf,
-                    area,
-                    state,
-                    self.credit_balance.as_ref(),
-                    compact,
-                    &theme,
-                );
+                crate::views::usage_modal::render_usage_modal(buf, area, state, compact, &theme);
             } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
             } else if let modal::ActiveModal::Settings {

@@ -15,7 +15,7 @@ pub(super) use helpers::{
     parse_session_load_running_prompt_id, parse_session_scheduler_background_loops,
 };
 pub(crate) use helpers::{
-    EffectMeta, RestoreProgressMsg, SessionFlags, is_disk_full_error,
+    EffectMeta, SessionFlags, is_disk_full_error,
     persist_permission_mode_and_notify, persist_setting, sanitize_user_error,
 };
 #[cfg(feature = "local-workspace")]
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use agent_client_protocol as acp;
 use tokio::task::JoinSet;
 use xai_acp_lib::{AcpAgentTx, acp_send};
-use xai_grok_telemetry::startup::{self, StartupOutcome, StartupPhase};
+use xai_grok_telemetry::startup::{self, StartupPhase};
 use actions::{
     ClipboardPasteTarget, Effect, ProbedAttachment, SubagentKillOutcome,
     SwitchModelError, TaskResult,
@@ -43,7 +43,6 @@ pub(crate) fn execute(
     acp_tx: &AcpAgentTx,
     cwd: &Path,
     session_flags: &SessionFlags,
-    progress_tx: &tokio::sync::mpsc::UnboundedSender<RestoreProgressMsg>,
 ) -> (bool, EffectMeta) {
     let mut meta = EffectMeta::default();
     let effect_is_send_now = matches!(effect, Effect::SendPromptNow { .. });
@@ -82,41 +81,11 @@ pub(crate) fn execute(
                 });
         }
         Effect::Logout => {
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    send_logout(&tx).await;
-                    TaskResult::LogoutComplete
-                });
+            tasks.spawn(async { TaskResult::LogoutComplete });
         }
         Effect::CancelAuth { request_seq } => {
-            let tx = acp_tx.clone();
-            tasks.spawn(async move { send_auth_cancel(&tx, request_seq).await });
-        }
-        Effect::CheckSubscription { verify } => {
-            let tx = acp_tx.clone();
-            tasks.spawn(async move { send_check_subscription(&tx, verify).await });
-        }
-        Effect::CreditLimitRecheck { agent_id } => {
-            let tx = acp_tx.clone();
-            tasks.spawn(async move { send_credit_limit_recheck(&tx, agent_id).await });
-        }
-        Effect::SchedulePaywallCheck => {
-            tasks
-                .spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    TaskResult::PaywallCheckTick
-                });
-        }
-        Effect::ScheduleGateVerifyTimeout { generation } => {
-            tasks
-                .spawn(async move {
-                    tokio::time::sleep(crate::app::subscription::GATE_VERIFY_TIMEOUT)
-                        .await;
-                    TaskResult::GateVerifyTimeout {
-                        generation,
-                    }
-                });
+            let _ = request_seq;
+            tasks.spawn(async { TaskResult::AuthCancelComplete });
         }
         Effect::SwitchAccount { request_seq, method_id: _, use_oauth: _ } => {
             let abort_handle = tasks.spawn(async move {
@@ -178,17 +147,17 @@ pub(crate) fn execute(
                         Some(serde_json::json!({"mcp_server_count": mcp_count})),
                     );
                     let create_start = std::time::Instant::now();
-                    let result = acp_send(
+                    let result = helpers::acp_send_bounded(
                             acp::NewSessionRequest::new(session_cwd.clone())
                                 .mcp_servers(mcp_servers)
                                 .meta(meta),
                             &tx,
+                            "Session creation",
                         )
                         .await;
                     let create_elapsed_ms = create_start.elapsed().as_millis() as u64;
                     match result {
                         Ok(resp) => {
-                            startup::report_total(StartupOutcome::Ok);
                             ulog::info(
                                 "session.create.done",
                                 Some(&resp.session_id.0),
@@ -293,7 +262,13 @@ pub(crate) fn execute(
                                 .into(),
                         );
                         let _phase = startup::phase_scope(StartupPhase::SessionCreate);
-                        let ext_resp = match acp_send(ext_req, &tx).await {
+                        let ext_resp = match helpers::acp_send_bounded(
+                                ext_req,
+                                &tx,
+                                "Worktree session resume",
+                            )
+                            .await
+                        {
                             Ok(resp) => {
                                 tracing::info!(
                                 session_id = %sid,
@@ -366,7 +341,6 @@ pub(crate) fn execute(
                         let (code_restored, restore_summary, restore_degree) = parse_worktree_restore_payload(
                             result_obj,
                         );
-                        startup::report_total(StartupOutcome::Ok);
                         return TaskResult::WorktreeForked {
                             agent_id,
                             session_id: acp::SessionId::new(new_session_id),
@@ -487,16 +461,16 @@ pub(crate) fn execute(
                         &xai_grok_tools::types::compat::CompatConfig::default(),
                     );
                     let _phase = startup::phase_scope(StartupPhase::SessionCreate);
-                    let result = acp_send(
+                    let result = helpers::acp_send_bounded(
                             acp::NewSessionRequest::new(session_cwd.clone())
                                 .mcp_servers(mcp_servers)
                                 .meta(meta),
                             &tx,
+                            "Worktree session creation",
                         )
                         .await;
                     match result {
                         Ok(resp) => {
-                            startup::report_total(StartupOutcome::Ok);
                             TaskResult::WorktreeSessionCreated {
                                 agent_id,
                                 session_id: resp.session_id,
@@ -547,7 +521,7 @@ pub(crate) fn execute(
                     let _phase = startup::phase_scope(StartupPhase::SessionCreate);
                     ulog::info("session.load.start", Some(&acp_session_id.0), None);
                     let load_started = std::time::Instant::now();
-                    let result = acp_send(
+                    let result = helpers::acp_send_bounded(
                             acp::LoadSessionRequest::new(
                                     acp_session_id.clone(),
                                     cwd.clone(),
@@ -555,6 +529,7 @@ pub(crate) fn execute(
                                 .mcp_servers(mcp_servers.clone())
                                 .meta(meta.clone()),
                             &tx,
+                            "Session loading",
                         )
                         .await;
                     let load_elapsed_ms = load_started.elapsed().as_millis() as u64;
@@ -571,7 +546,6 @@ pub(crate) fn execute(
                                 Some(&acp_session_id.0),
                                 Some(serde_json::json!({"elapsed_ms": load_elapsed_ms})),
                             );
-                            startup::report_total(StartupOutcome::Ok);
                             let (code_restored, restore_summary, restore_degree) = parse_session_load_restore_meta(
                                 resp.meta.as_ref(),
                             );
@@ -879,172 +853,6 @@ pub(crate) fn execute(
                         }
                     }
                 });
-        }
-        Effect::RestoreAndLoadSession { agent_id, session_id, session_cwd: _ } => {
-            let _ = session_id;
-            tasks.spawn(async move {
-                TaskResult::SessionRestoreFailed {
-                    agent_id,
-                    error: "Remote session restore is disabled in the clean local build."
-                        .to_owned(),
-                }
-            });
-            #[cfg(any())]
-            {
-            use xai_grok_shell::agent::session_registry_client::SessionRegistryClient;
-            use xai_grok_shell::session::restore::restore_session_with_storage;
-            let setup_started = std::time::Instant::now();
-            let raw_config = xai_grok_shell::config::load_effective_config();
-            let setup = raw_config
-                .ok()
-                .and_then(|raw| {
-                    let cfg = xai_grok_shell::agent::config::Config::new_from_toml_cfg(
-                            &raw,
-                        )
-                        .ok()?;
-                    let proxy_base = cfg.endpoints.proxy_url();
-                    let deployment_key = cfg.endpoints.deployment_key.clone();
-                    let alpha_test_key = cfg.endpoints.alpha_test_key.clone();
-                    let auth_manager = crate::app::session_startup::pre_acp_auth_manager(
-                        &cfg,
-                    );
-                    let registry = SessionRegistryClient::new(&proxy_base, String::new())
-                        .with_deployment_key(deployment_key.clone())
-                        .with_alpha_test_key(alpha_test_key.clone())
-                        .with_session_id(session_id.clone())
-                        .with_auth(auth_manager.clone());
-                    let storage = xai_grok_shell::auth::credential_provider::build_storage_client_for_proxy(
-                        &proxy_base,
-                        deployment_key,
-                        alpha_test_key,
-                        Some(auth_manager.clone()),
-                        None,
-                        Some(session_id.clone()),
-                        "grok-pager",
-                    );
-                    Some((auth_manager, registry, storage))
-                });
-            tracing::info!(
-                elapsed_ms = setup_started.elapsed().as_millis() as u64,
-                ok = setup.is_some(),
-                "restore: auth/client setup"
-            );
-            let target_cwd = cwd.to_path_buf();
-            let ptx = progress_tx.clone();
-            tasks
-                .spawn(async move {
-                    let Some((auth_manager, registry_client, storage_client)) = setup
-                    else {
-                        return TaskResult::SessionRestoreFailed {
-                            agent_id,
-                            error: "Failed to load configuration.".into(),
-                        };
-                    };
-                    let _ = auth_manager.auth().await;
-                    let progress: Option<
-                        xai_grok_shell::session::restore::ProgressCallback,
-                    > = {
-                        use xai_grok_shell::session::restore::{PhaseStep, RestorePhase};
-                        Some(
-                            Box::new(move |event| {
-                                let msg = match (event.phase, event.step) {
-                                    (RestorePhase::Download, PhaseStep::Start) => {
-                                        Some("Downloading session archives...".to_string())
-                                    }
-                                    (RestorePhase::Download, PhaseStep::End) => {
-                                        Some(
-                                            format!(
-                                "Downloads finished ({}).",
-                                format_restore_elapsed(event.elapsed),
-                            ),
-                                        )
-                                    }
-                                    (RestorePhase::Codebase, PhaseStep::Start) => {
-                                        Some("Restoring code...".to_string())
-                                    }
-                                    (RestorePhase::Codebase, PhaseStep::End) => {
-                                        event
-                                            .detail
-                                            .as_ref()
-                                            .map(|detail| format!("Code restored ({detail})."))
-                                    }
-                                    (RestorePhase::Memory, PhaseStep::Start) => {
-                                        Some("Restoring memory...".to_string())
-                                    }
-                                    (RestorePhase::SessionState, PhaseStep::Start) => {
-                                        Some("Restoring session state...".to_string())
-                                    }
-                                    (RestorePhase::SessionState, PhaseStep::End) => {
-                                        event
-                                            .detail
-                                            .as_ref()
-                                            .map(|detail| format!("Session state restored ({detail})."))
-                                    }
-                                    (RestorePhase::Finalize, _) => {
-                                        let elapsed_secs = event.elapsed.as_secs();
-                                        let status = if event.incomplete {
-                                            "Restore incomplete"
-                                        } else {
-                                            "Restore complete"
-                                        };
-                                        if elapsed_secs >= 60 {
-                                            Some(
-                                                format!(
-                                        "{status} ({}m{:02}s).",
-                                        elapsed_secs / 60,
-                                        elapsed_secs % 60
-                                    ),
-                                            )
-                                        } else {
-                                            Some(format!("{status} ({elapsed_secs}s)."))
-                                        }
-                                    }
-                                    _ => None,
-                                };
-                                if let Some(text) = msg {
-                                    let _ = ptx
-                                        .send(RestoreProgressMsg {
-                                            agent_id,
-                                            message: text,
-                                        });
-                                }
-                            }),
-                        )
-                    };
-                    let cwd_str = target_cwd.to_string_lossy().to_string();
-                    match restore_session_with_storage(
-                            &registry_client,
-                            &storage_client,
-                            &session_id,
-                            &cwd_str,
-                            xai_grok_shell::session::restore::RestoreSessionOpts {
-                                turn_override: None,
-                                progress,
-                                restore_code: true,
-                            },
-                        )
-                        .await
-                    {
-                        Ok(result) => {
-                            let effective_id = if result.local_session_id.is_empty() {
-                                session_id
-                            } else {
-                                result.local_session_id
-                            };
-                            TaskResult::SessionRestored {
-                                agent_id,
-                                local_session_id: effective_id,
-                            }
-                        }
-                        Err(e) => {
-                            TaskResult::SessionRestoreFailed {
-                                agent_id,
-                                error: format!("{e:#}"),
-                            }
-                        }
-                    }
-                });
-            }
         }
         Effect::LoadCardDetail { source, session_id, cwd, generation } => {
             tasks
@@ -1947,28 +1755,9 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::PersistAnnouncementsHidden { hidden_ids } => {
-            tasks
-                .spawn(async move {
-                    xai_grok_announcements::write_hidden_announcement_ids(&hidden_ids)
-                        .await;
-                    TaskResult::AnnouncementsHiddenPersisted {
-                        result: Ok(()),
-                    }
-                });
-        }
         Effect::PersistPrivacyBannerAcked { acked_at } => {
-            tasks
-                .spawn(async move {
-                    if let Err(e) = xai_grok_shell::util::config::set_privacy_banner_acked(
-                            acked_at,
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %e, "failed to persist privacy_banner_acked");
-                    }
-                    TaskResult::CancelComplete
-                });
+            let _ = acked_at;
+            tasks.spawn(async { TaskResult::CancelComplete });
         }
         Effect::PersistMemoryFullscreen { fullscreen } => {
             persist_hint(
@@ -3048,15 +2837,6 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::ShareSession { agent_id, session_id } => {
-            let _ = session_id;
-            tasks.spawn(async move {
-                TaskResult::ShareSessionFailed {
-                    agent_id,
-                    error: "Session sharing is disabled in the clean local build.".to_owned(),
-                }
-            });
-        }
         Effect::FetchSessionAgentName { agent_id, session_id } => {
             let tx = acp_tx.clone();
             tasks
@@ -3298,68 +3078,7 @@ pub(crate) fn execute(
                 });
         }
         Effect::SendFeedback { agent_id, session_id, feedback_text } => {
-            // Feedback used to be posted to the hosted `x.ai/feedback`
-            // extension.  The command is retained as a compatibility action,
-            // but a clean local build never sends the text or session id.
             let _ = (agent_id, session_id, feedback_text);
-            #[cfg(any())]
-            {
-            use xai_grok_shell::session::ClientType;
-            use xai_grok_shell::session::acp_types::ClientFeedbackInput;
-            let terminal_info = Some(
-                crate::terminal::terminal_context().feedback_info(),
-            );
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    let input = ClientFeedbackInput {
-                        session_id: session_id.0.to_string(),
-                        client_type: ClientType::Tui,
-                        rating_type: None,
-                        rating_value: None,
-                        feedback_text: Some(feedback_text.clone()),
-                        feedback_categories: vec![],
-                        context_type: None,
-                        turn_number: None,
-                        request_id: None,
-                        client_version: Some(xai_grok_version::VERSION.to_string()),
-                        metadata: None,
-                        terminal_info,
-                    };
-                    let raw_params = match serde_json::value::to_raw_value(&input) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return TaskResult::FeedbackFailed {
-                                agent_id,
-                                error: sanitize_user_error(
-                                    &format!(
-                                "couldn't serialize feedback: {e}"
-                            ),
-                                ),
-                            };
-                        }
-                    };
-                    let request = acp::ExtRequest::new(
-                        "x.ai/feedback",
-                        raw_params.into(),
-                    );
-                    match acp_send(request, &tx).await {
-                        Ok(_) => {
-                            TaskResult::FeedbackComplete {
-                                agent_id,
-                            }
-                        }
-                        Err(e) => {
-                            TaskResult::FeedbackFailed {
-                                agent_id,
-                                error: sanitize_user_error(
-                                    &format!("couldn't send feedback: {e}"),
-                                ),
-                            }
-                        }
-                    }
-                });
-            }
         }
         Effect::RewriteMemoryNote {
             agent_id,
@@ -3436,59 +3155,7 @@ pub(crate) fn execute(
                 });
         }
         Effect::SendBtw { agent_id, session_id, question, minimal_request_id } => {
-            let _ = (session_id, question);
-            tasks.spawn(async move {
-                TaskResult::BtwResponse {
-                    agent_id,
-                    result: Err("Side questions are disabled in the clean local build.".to_owned()),
-                    minimal_request_id,
-                }
-            });
-            #[cfg(any())]
-            {
-            let tx = acp_tx.clone();
-            let is_api_key_auth = session_flags.is_api_key_auth;
-            tasks
-                .spawn(async move {
-                    let request = acp::ExtRequest::new(
-                        "x.ai/btw",
-                        serde_json::value::to_raw_value(
-                                &serde_json::json!({
-                        "sessionId": session_id.0.to_string(),
-                        "question": question,
-                    }),
-                            )
-                            .expect("serialize btw params")
-                            .into(),
-                    );
-                    match acp_send(request, &tx).await {
-                        Ok(resp) => {
-                            let parsed: serde_json::Value = serde_json::from_str(
-                                    resp.0.get(),
-                                )
-                                .unwrap_or_default();
-                            let answer = parsed
-                                .get("result")
-                                .and_then(|r| r.get("answer"))
-                                .and_then(|a| a.as_str())
-                                .unwrap_or("No response")
-                                .to_string();
-                            TaskResult::BtwResponse {
-                                agent_id,
-                                result: Ok(answer),
-                                minimal_request_id,
-                            }
-                        }
-                        Err(e) => {
-                            TaskResult::BtwResponse {
-                                agent_id,
-                                result: Err(format_acp_error(&e, is_api_key_auth)),
-                                minimal_request_id,
-                            }
-                        }
-                    }
-                });
-            }
+            let _ = (agent_id, session_id, question, minimal_request_id);
         }
         Effect::SendRecap { session_id, auto } => {
             tasks.spawn(async move {
@@ -3540,118 +3207,19 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchCatalogEntry { kind, name } => {
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    let params = serde_json::json!({ "kind": kind, "name": name });
-                    let request = acp::ExtRequest::new(
-                        "x.ai/bundle/entry/get",
-                        serde_json::value::to_raw_value(&params)
-                            .expect("serialize bundle/entry/get params")
-                            .into(),
-                    );
-                    match acp_send(request, &tx).await {
-                        Ok(resp) => {
-                            let wrapper: serde_json::Value = serde_json::from_str(
-                                    resp.0.get(),
-                                )
-                                .unwrap_or_default();
-                            if let Some(err) = wrapper.get("error") {
-                                let msg = err
-                                    .as_str()
-                                    .map(String::from)
-                                    .unwrap_or_else(|| "unknown error".to_string());
-                                return TaskResult::CatalogEntryFailed {
-                                    error: msg,
-                                };
-                            }
-                            let inner = wrapper.get("result").unwrap_or(&wrapper);
-                            match serde_json::from_value::<
-                                super::bundle::EntryGetResult,
-                            >(inner.clone()) {
-                                Ok(r) => {
-                                    TaskResult::CatalogEntryReady {
-                                        kind: r.kind,
-                                        name: r.name,
-                                        content: r.content,
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::debug!("failed to parse catalog entry response: {e}");
-                                    TaskResult::CatalogEntryFailed {
-                                        error: "couldn't load entry".to_string(),
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            TaskResult::CatalogEntryFailed {
-                                error: sanitize_user_error(
-                                    &format!("couldn't load entry: {e}"),
-                                ),
-                            }
-                        }
-                    }
-                });
+        Effect::FetchCatalogEntry { kind: _, name: _ } => {
+            tasks.spawn(async {
+                TaskResult::CatalogEntryFailed {
+                    error: "Catalog entries are unavailable in the clean local build.".to_owned(),
+                }
+            });
         }
         Effect::FetchBundleStatus => {
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    let request = acp::ExtRequest::new(
-                        "x.ai/bundle/status",
-                        serde_json::value::to_raw_value(&serde_json::json!({}))
-                            .expect("serialize bundle/status params")
-                            .into(),
-                    );
-                    match acp_send(request, &tx).await {
-                        Ok(resp) => {
-                            let wrapper: serde_json::Value = serde_json::from_str(
-                                    resp.0.get(),
-                                )
-                                .unwrap_or_default();
-                            if let Some(err) = wrapper.get("error") {
-                                let msg = err
-                                    .as_str()
-                                    .map(String::from)
-                                    .unwrap_or_else(|| "unknown error".to_string());
-                                return TaskResult::BundleStatusFailed {
-                                    error: msg,
-                                };
-                            }
-                            let inner = wrapper.get("result").unwrap_or(&wrapper);
-                            match serde_json::from_value::<
-                                super::bundle::BundleStatusResult,
-                            >(inner.clone()) {
-                                Ok(r) => {
-                                    TaskResult::BundleStatusReady {
-                                        has_cache: r.has_cache,
-                                        version: r.version,
-                                        personas: r.personas,
-                                        roles: r.roles,
-                                        agents: r.agents,
-                                        skills: r.skills,
-                                        persona_details: r.persona_details,
-                                        role_details: r.role_details,
-                                    }
-                                }
-                                Err(_) => {
-                                    TaskResult::BundleStatusFailed {
-                                        error: "couldn't fetch bundle status".to_string(),
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            TaskResult::BundleStatusFailed {
-                                error: sanitize_user_error(
-                                    &format!("couldn't fetch bundle status: {e}"),
-                                ),
-                            }
-                        }
-                    }
-                });
+            tasks.spawn(async {
+                TaskResult::BundleStatusFailed {
+                    error: "Bundle status is unavailable in the clean local build.".to_owned(),
+                }
+            });
         }
         Effect::RefreshAvailableCommands { agent_id, session_id } => {
             let tx = acp_tx.clone();
@@ -3985,91 +3553,6 @@ pub(crate) fn execute(
                         last_turn_summary_gen,
                     }
                 });
-        }
-        Effect::FetchBilling {
-            agent_id,
-            silent,
-            nonce,
-        } => {
-            tasks.spawn(async move {
-                TaskResult::BillingError {
-                    agent_id,
-                    error: "Usage and billing are disabled in the clean local build.".to_owned(),
-                    silent,
-                    nonce,
-                }
-            });
-        }
-        #[cfg(any())]
-        Effect::FetchBilling { agent_id, silent, nonce } => {
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    use xai_grok_shell::extensions::billing::BillingConfigResponse;
-                    let req = acp::ExtRequest::new(
-                        "x.ai/billing",
-                        serde_json::value::to_raw_value(&serde_json::json!({}))
-                            .expect("serialize billing params")
-                            .into(),
-                    );
-                    let parsed = match acp_send(req, &tx).await {
-                        Ok(resp) => {
-                            let wrapper: serde_json::Value = serde_json::from_str(
-                                    resp.0.get(),
-                                )
-                                .unwrap_or_default();
-                            let result = wrapper.get("result").unwrap_or(&wrapper);
-                            serde_json::from_value::<
-                                BillingConfigResponse,
-                            >(result.clone())
-                        }
-                        Err(e) => {
-                            return TaskResult::BillingError {
-                                agent_id,
-                                error: sanitize_user_error(&format!("{e}")),
-                                silent,
-                                nonce,
-                            };
-                        }
-                    };
-                    let billing = match parsed {
-                        Ok(billing) => billing,
-                        Err(e) => {
-                            return TaskResult::BillingError {
-                                agent_id,
-                                error: format!("Parse error: {e}"),
-                                silent,
-                                nonce,
-                            };
-                        }
-                    };
-                    let subscription_tier = billing.subscription_tier;
-                    let balance = billing.config.map(credit_balance_from_config);
-                    let autotopup = if has_prepaid_credits(balance.as_ref()) {
-                        fetch_auto_topup_info(&tx).await
-                    } else {
-                        crate::views::credit_bar::AutoTopupFetch::Cleared
-                    };
-                    TaskResult::BillingFetched {
-                        agent_id,
-                        balance,
-                        silent,
-                        subscription_tier,
-                        autotopup,
-                        nonce,
-                    }
-                });
-        }
-        Effect::RefreshGate => {
-            tasks.spawn(async { TaskResult::GateRefreshed { settings: None } });
-        }
-        Effect::FetchAppBilling => {
-            tasks.spawn(async {
-                TaskResult::AppBillingFetched {
-                    balance: None,
-                    autotopup: crate::views::credit_bar::AutoTopupFetch::Cleared,
-                }
-            });
         }
         Effect::DebounceSuggestions { agent_id, generation } => {
             tasks

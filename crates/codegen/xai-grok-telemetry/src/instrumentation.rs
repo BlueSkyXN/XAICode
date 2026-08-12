@@ -326,7 +326,8 @@ where
     match mode {
         InstrumentationMode::Chrome => build_chrome_layer(),
         InstrumentationMode::Log => build_log_layer(mode),
-        // Server uses the OTEL layer in tracing.rs, not this instrumentation layer
+        // Server-side tracing is configured by its composition root, not this
+        // local instrumentation helper.
         InstrumentationMode::Disabled | InstrumentationMode::Server => {
             build_log_layer(InstrumentationMode::Disabled)
         }

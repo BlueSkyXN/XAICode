@@ -100,14 +100,13 @@ fn bool_label(v: bool) -> &'static str {
 /// `trigger` label and the guard set the policy applies (see the module table).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SwapTrigger {
-    /// Hub `session.bind` against an existing session that carried a changed
-    /// explicit toolset (`WorkspaceHandle::rebind_existing_hub_session`).
+    /// Compatibility label for the former owner-rebind path.
     OwnerRebind,
     /// The `workspace.update_tool_config` RPC.
     UpdateRpc,
     /// `re_resolve_all_sessions` after an MCP snapshot change.
     McpSnapshot,
-    /// `re_resolve_all_sessions` after a remote tools change/notification.
+    /// `re_resolve_all_sessions` after a compatibility tools change/notification.
     HubTools,
     /// `re_resolve_all_sessions` from an unrecognized source (test callers
     /// only today). Snapshot-rebuild policy, `other` metric label.

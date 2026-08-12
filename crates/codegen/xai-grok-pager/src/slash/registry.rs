@@ -171,7 +171,6 @@ impl CommandRegistry {
         // clean local build. This is stronger than merely removing them from
         // the help list: typed invocations also fail before any effect runs.
         for name in [
-            "announcements",
             "dashboard",
             "feedback",
             "imagine",
@@ -181,17 +180,12 @@ impl CommandRegistry {
             "privacy",
             "recap",
             "share",
-            "voice",
         ] {
             hidden.insert(name.to_string());
         }
         // `/auto` is fail-closed: hidden until `set_auto_mode_available(true)`.
         hidden.insert("auto".to_string());
-        // `/share` starts menu-hidden (still dispatchable) until
-        // `set_share_visible(true)`. Menu-only so typed `/share` can
-        // surface a client disable message rather than PassThrough.
         let mut menu_hidden = HashSet::new();
-        menu_hidden.insert("share".to_string());
         let mut reg = Self {
             commands: builtins,
             sources,
@@ -224,7 +218,7 @@ impl CommandRegistry {
     /// typed invocation, ignoring the menu-only gate (`menu_hidden`).
     ///
     /// Still returns `None` for hard-hidden commands (feature gates like
-    /// `/voice` / `/dashboard`, or `/auto` when the auto permission-mode
+    /// `/dashboard`, or `/auto` when the auto permission-mode
     /// feature is unavailable — those must stay fail-closed), restricted
     /// commands, and commands whose `required_tools()` are not all in the
     /// advertised toolset.
@@ -433,14 +427,6 @@ impl CommandRegistry {
     pub fn set_recap_visible(&mut self, visible: bool) {
         let _ = visible;
         self.hidden.insert("recap".to_string());
-        self.rebuild_triggers();
-    }
-
-    /// Compatibility setter for the removed voice command. It remains
-    /// hard-hidden even if stale metadata asks to reveal it.
-    pub fn set_voice_visible(&mut self, visible: bool) {
-        let _ = visible;
-        self.hidden.insert("voice".to_string());
         self.rebuild_triggers();
     }
 

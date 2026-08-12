@@ -55,7 +55,6 @@
                     source: "local".into(),
                     wire_source: crate::views::mcps_modal::McpWireSource::Local,
                     plugin_name: None,
-                    is_managed_gateway: false,
                 },
             ]));
         }
@@ -528,7 +527,6 @@
                     source: "local".into(),
                     wire_source: crate::views::mcps_modal::McpWireSource::Local,
                     plugin_name: None,
-                    is_managed_gateway: false,
                 },
             ]));
         }
@@ -730,4 +728,3 @@
             "legacy fallback targets the foregrounded agent"
         );
     }
-

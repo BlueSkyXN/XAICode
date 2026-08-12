@@ -61,16 +61,10 @@ pub enum Action {
     DeleteCurrentSessionAnswered {
         confirmed: bool,
     },
-    /// Open grok.com in the browser for SuperGrok subscription upsell.
-    OpenSupergrokUrl,
-    /// Re-check subscription status via the shell's `x.ai/auth/check_subscription`.
-    CheckSubscription,
     /// Open an arbitrary URL in the system browser (with scheme validation).
     OpenUrl(String),
     /// Open a semantic scrollback link.
     OpenLink(crate::render::osc8::LinkTarget),
-    /// Open grok.com managed connectors, appending session teamId when set.
-    OpenManagedConnectors,
     /// Cycle to the next visible link (or highlight the first if none selected).
     OpenNextLink,
     /// Cycle to the previous visible link.
@@ -174,19 +168,6 @@ pub enum Action {
         /// Pasted images riding along with the prompt.
         images: Vec<crate::prompt_images::PastedImage>,
     },
-    /// Enable session voice mode and start recording (the Ctrl+Space
-    /// hold-to-talk key-press, on terminals that report key releases).
-    /// Start-only — never stops; use [`Self::VoiceStop`] / [`Self::VoiceToggle`]
-    /// / Esc to stop.
-    EnableVoiceMode,
-    /// Toggle capture (`/voice`, Ctrl+Space, Esc while listening, recording-row
-    /// `[stop]`, and Ctrl+Space on terminals without key releases). Stops if
-    /// recording, otherwise starts.
-    VoiceToggle,
-    /// Stop capture unconditionally (Ctrl+Space hold-to-talk key release). Clears
-    /// any pending cold-start so a release during pipeline spawn can't leave a
-    /// hot mic.
-    VoiceStop,
     /// Send a direct bash command (bypasses agent loop).
     SendBashCommand(String),
     /// The user wiped a substantial prompt draft: show the seen-gated
@@ -426,14 +407,6 @@ pub enum Action {
         kind: String,
         name: String,
     },
-    /// Hide the announcements banner.
-    AnnouncementsHide,
-    /// Show the announcements banner.
-    AnnouncementsShow,
-    /// Open the promo CTA link (url resolved from current state at dispatch
-    /// time, mirroring how `AnnouncementsHide` resolves its target). The
-    /// payload records which surface activated it, for telemetry.
-    AnnouncementsOpenCta(xai_grok_telemetry::events::AnnouncementCtaSurface),
     /// Cycle session mode (Shift+Tab): Normal → Plan → Always-Approve → Normal.
     /// Plan mode sends a signal to the shell; always-approve is local.
     CycleMode,
@@ -517,16 +490,6 @@ pub enum Action {
     SetHunkTrackerMode(String),
     /// Set default screen mode (`fullscreen` | `minimal`); restart-required.
     SetScreenMode(String),
-    /// Enable/disable the Ctrl+Space / F8 voice-dictation shortcut. SHELL-owned;
-    /// persisted to `[ui].voice_keybind_enabled`. Takes effect on the next
-    /// keypress; `/voice` is unaffected.
-    SetVoiceKeybindEnabled(bool),
-    /// Set the voice capture mode (`toggle` | `hold`). SHELL-owned; persisted to
-    /// `[ui].voice_capture_mode`. Takes effect for the next Ctrl+Space press.
-    SetVoiceCaptureMode(String),
-    /// Set the voice STT language (catalog code or `auto`). SHELL-owned; persisted
-    /// to `[ui].voice_stt_language`. Takes effect for the next voice capture.
-    SetVoiceSttLanguage(String),
     /// Toggle timestamp display on messages.
     ToggleTimestamps,
     /// Toggle compact mode (reduce user message padding).
@@ -683,10 +646,8 @@ pub enum Action {
     },
     /// Show detailed context usage (progress bar, token breakdown, stats).
     ShowContextInfo,
-    /// `/usage` — session token/cost, plus consumer credits when visible.
+    /// `/usage` — local session token/cost information.
     ShowUsage,
-    /// `/usage manage` — open consumer billing (no-op if surface hidden).
-    ManageBilling,
     /// Commit a read-only list of the queued prompts as a system block
     /// (`/queue`). The surface minimal mode uses in place of the `QueuePane`.
     ShowQueue,
@@ -1498,13 +1459,6 @@ pub enum Effect {
         cwd: String,
         generation: u64,
     },
-    /// Restore a remote session from GCS then load it. Only Build rows reach
-    /// this effect: conversation rows have no GCS archive.
-    RestoreAndLoadSession {
-        agent_id: AgentId,
-        session_id: String,
-        session_cwd: String,
-    },
     /// Send a prompt to the agent.
     SendPrompt {
         agent_id: AgentId,
@@ -1586,10 +1540,6 @@ pub enum Effect {
     /// Runs off the render path via `spawn_blocking`. Result is cached
     /// on `AppView` so `/release-notes` and the welcome screen share it.
     FetchChangelog,
-    /// Persist the hidden announcement ids to disk.
-    PersistAnnouncementsHidden {
-        hidden_ids: std::collections::BTreeSet<String>,
-    },
     /// Persist `[privacy].privacy_banner_acked` (RFC 3339 dismiss time).
     PersistPrivacyBannerAcked { acked_at: String },
     /// Persist memory modal fullscreen preference to `[hints]` in config.toml.
@@ -1886,11 +1836,6 @@ pub enum Effect {
         tool_name: String,
         enabled: bool,
     },
-    /// Share the current session via URL.
-    ShareSession {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
-    },
     /// Fetch and display session info via x.ai/session/info.
     /// Auth lines are derived in the effect from SessionFlags + env (not Effect fields).
     ShowSessionInfo {
@@ -1977,19 +1922,6 @@ pub enum Effect {
     /// poll stops instead of running until the code expires. `request_seq`
     /// scopes the cancel so a delayed RPC cannot tear down a successor login.
     CancelAuth { request_seq: u64 },
-    /// Re-check subscription status via `x.ai/auth/check_subscription`.
-    /// `verify` scopes the result to a deferred-gate verification (see
-    /// [`crate::app::subscription`]); `None` for generic checks.
-    CheckSubscription { verify: Option<u64> },
-    /// One-shot subscription re-check triggered by a credit-limit 403.
-    /// If the tier changed, the stashed prompt is retried instead of
-    /// showing the upsell modal.
-    CreditLimitRecheck { agent_id: AgentId },
-    /// Schedule a 5s timer that fires `TaskResult::PaywallCheckTick`.
-    SchedulePaywallCheck,
-    /// Schedule `TaskResult::GateVerifyTimeout { generation }` after
-    /// [`crate::app::subscription::GATE_VERIFY_TIMEOUT`].
-    ScheduleGateVerifyTimeout { generation: u64 },
     /// Log out then authenticate sequentially in one task.
     SwitchAccount {
         request_seq: u64,
@@ -2074,20 +2006,6 @@ pub enum Effect {
         session_id: acp::SessionId,
         target_prompt_index: usize,
     },
-    /// Fetch billing/credit usage from the agent's `x.ai/billing` extension.
-    /// When `silent` is true the result updates `credit_balance` without
-    /// pushing a system message into scrollback (used for automatic refreshes
-    /// on session init and after each turn).
-    FetchBilling {
-        agent_id: AgentId,
-        silent: bool,
-        /// Usage-modal fetch generation (`0` = background refresh; those
-        /// never touch the modal's loading/error flags).
-        nonce: u64,
-    },
-    /// Fetch billing data at the app level (no agent required).
-    /// Used on startup to populate the welcome-screen credit warning.
-    FetchAppBilling,
     /// Fetch per-session token/cost via `x.ai/session/usage` (auth-agnostic).
     FetchSessionUsage {
         agent_id: AgentId,
@@ -2095,8 +2013,6 @@ pub enum Effect {
         /// Usage-modal fetch generation; echoed back on the task result.
         nonce: u64,
     },
-    /// Re-fetch remote settings to check subscription gate.
-    RefreshGate,
     /// Spawn a debounce sleep task for shell suggestions. `agent_id` rides
     /// to the expiry so the fetch is built from the arming agent, not
     /// whatever view is active when the timer fires.
@@ -2186,6 +2102,20 @@ pub enum DoctorPlanningOutcome {
 /// Result from a completed async [`Effect`].
 ///
 /// Wrapped in `Action::TaskComplete` and dispatched synchronously.
+impl TaskResult {
+    /// True for results that deliver the first usable session. A quit
+    /// before dispatch abandons instead of recording; accepted so the
+    /// token stays single-owner.
+    pub fn ends_startup(&self) -> bool {
+        matches!(
+            self,
+            TaskResult::SessionCreated { .. }
+                | TaskResult::SessionLoaded { .. }
+                | TaskResult::WorktreeSessionCreated { .. }
+                | TaskResult::WorktreeForked { .. }
+        )
+    }
+}
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
@@ -2345,23 +2275,6 @@ pub enum TaskResult {
         generation: u64,
         detail: crate::app::app_view::CardDetail,
     },
-    /// Remote session restored successfully — now load it. Always a Build
-    /// disk row (see [`Effect::RestoreAndLoadSession`]).
-    SessionRestored {
-        agent_id: AgentId,
-        /// The local session ID (may differ from remote ID).
-        local_session_id: String,
-    },
-    /// Remote session restore failed.
-    SessionRestoreFailed {
-        agent_id: AgentId,
-        error: String,
-    },
-    /// Incremental progress during remote session restore.
-    SessionRestoreProgress {
-        agent_id: AgentId,
-        message: String,
-    },
     /// Prompt response received (turn ended).
     PromptResponse {
         agent_id: AgentId,
@@ -2436,10 +2349,6 @@ pub enum TaskResult {
     ChangelogFetched {
         markdown: Option<String>,
         entries: Vec<xai_grok_shell::util::changelog::ChangelogEntry>,
-    },
-    /// Announcements hidden state persisted.
-    AnnouncementsHiddenPersisted {
-        result: Result<(), String>,
     },
     /// Cross-session prompt history loaded from ACP.
     PromptHistoryLoaded {
@@ -2573,16 +2482,6 @@ pub enum TaskResult {
     McpToggleDone {
         agent_id: AgentId,
         result: Result<(), String>,
-    },
-    /// Share session completed successfully.
-    ShareSessionComplete {
-        agent_id: AgentId,
-        share_url: String,
-    },
-    /// Share session failed.
-    ShareSessionFailed {
-        agent_id: AgentId,
-        error: String,
     },
     /// Session info fetched successfully.
     SessionInfoComplete {
@@ -2752,25 +2651,6 @@ pub enum TaskResult {
     LogoutComplete,
     /// Best-effort `x.ai/auth/cancel` finished (no UI update; state already left Authenticating).
     AuthCancelComplete,
-    /// Shell responded to `x.ai/auth/check_subscription`. `verify` echoes
-    /// the generation from `Effect::CheckSubscription` for deferred-gate
-    /// verifications.
-    CheckSubscriptionComplete {
-        verify: Option<u64>,
-        meta: Option<serde_json::Value>,
-    },
-    /// Result of the credit-limit subscription re-check. If the tier
-    /// changed the stashed prompt is retried; otherwise the upsell is shown.
-    CreditLimitRecheckComplete {
-        agent_id: AgentId,
-        meta: Option<serde_json::Value>,
-    },
-    /// 5s paywall check timer fired -- time to send another check.
-    PaywallCheckTick,
-    /// The deferred-gate verification window expired.
-    GateVerifyTimeout {
-        generation: u64,
-    },
     /// The 2-second auth copy feedback timer expired.
     AuthCopyFeedbackTimeout {
         generation: u64,
@@ -2811,36 +2691,6 @@ pub enum TaskResult {
     RewindExecuteFailed {
         agent_id: AgentId,
         error: String,
-    },
-    /// Billing data fetched from the agent.
-    BillingFetched {
-        agent_id: AgentId,
-        balance: Option<crate::views::credit_bar::CreditBalance>,
-        /// When true, update `credit_balance` silently (no scrollback message).
-        silent: bool,
-        /// Subscription tier piggybacked from remote settings.
-        subscription_tier: Option<String>,
-        /// Auto top-up rule fetch result; `Unchanged` keeps any cached rule.
-        autotopup: crate::views::credit_bar::AutoTopupFetch,
-        /// Usage-modal fetch generation (`0` = background refresh).
-        nonce: u64,
-    },
-    /// App-level billing data (welcome screen).
-    AppBillingFetched {
-        balance: Option<crate::views::credit_bar::CreditBalance>,
-        autotopup: crate::views::credit_bar::AutoTopupFetch,
-    },
-    GateRefreshed {
-        settings: Option<xai_grok_shell::util::config::RemoteSettings>,
-    },
-    /// Billing fetch failed with an error message.
-    BillingError {
-        agent_id: AgentId,
-        error: String,
-        /// When true, swallow the error silently (background refresh).
-        silent: bool,
-        /// Usage-modal fetch generation (`0` = background refresh).
-        nonce: u64,
     },
     /// Debounce timer for shell suggestions expired. Routed by the arming
     /// `agent_id`, like the sibling `PluginCtaDebounceExpired`.

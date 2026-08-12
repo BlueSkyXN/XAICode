@@ -11,9 +11,9 @@ use std::sync::Arc;
 /// A single tool search result.
 #[derive(Debug, Clone)]
 pub struct ToolSearchResult {
-    /// Canonical tool name (e.g., `"linear__save_issue"` or a managed gateway `{connector_id}__{tool_id}`).
+    /// Canonical qualified tool name (e.g., `"linear__save_issue"`).
     pub tool_name: String,
-    /// MCP server name, managed gateway connector name, or source/group name.
+    /// MCP server name or source/group name.
     pub server_name: String,
     /// Tool description.
     pub description: String,

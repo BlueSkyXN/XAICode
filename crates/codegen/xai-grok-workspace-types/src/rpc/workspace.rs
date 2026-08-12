@@ -167,8 +167,7 @@ pub struct ListBackgroundTasksResponse {
 
 /// `workspace.list_background_tasks` — list the outstanding background terminal
 /// commands for `session_id`, for post-compaction `<system-reminder>` state.
-/// `WorkspaceClient` is session-agnostic, so the caller supplies the hub-bound
-/// session id.
+/// The caller supplies the session id because this DTO is session-agnostic.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ListBackgroundTasksReq {
     pub session_id: String,
@@ -259,8 +258,7 @@ impl WorkspaceRpc for ListTodosReq {
 
 /// Typed response of `workspace.info`.
 ///
-/// SYNC: matches the object built by the `workspace.info` dispatch arm
-/// in `xai-grok-workspace/src/hub_server.rs`.
+/// SYNC: preserves the existing workspace-info wire shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceInfo {
     /// `std::env::consts::OS` on the server (e.g. `"linux"`).

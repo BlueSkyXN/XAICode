@@ -273,6 +273,32 @@ fn session_loaded_without_adoption_finishes_replayed_running_entries() {
         "replayed running entries must be finished when no turn is adopted"
     );
 }
+/// Resume into a cwd with `.git/grok-worktree-source` sets `session.is_worktree`.
+#[test]
+fn load_session_marks_standalone_worktree_cwd() {
+    let mut app = test_app();
+    let main = crate::test_util::TempGitRepo::init("main-only");
+    let clone = main.standalone_clone("wt-branch");
+    dispatch(
+        Action::LoadSession("sess-wt".into(), Some(clone.path.clone()), false),
+        &mut app,
+    );
+    assert!(
+        app.agents[&AgentId(0)].session.is_worktree,
+        "resume into a standalone grok worktree must set session.is_worktree"
+    );
+    assert_eq!(app.agents[&AgentId(0)].session.cwd, clone.path);
+}
+#[test]
+fn load_session_plain_repo_is_not_worktree() {
+    let mut app = test_app();
+    let repo = crate::test_util::TempGitRepo::init("main");
+    dispatch(
+        Action::LoadSession("sess-plain-git".into(), Some(repo.path.clone()), false),
+        &mut app,
+    );
+    assert!(!app.agents[&AgentId(0)].session.is_worktree);
+}
 /// Cross-cwd resume anchors the agent cwd to the resolved origin cwd.
 #[test]
 fn load_session_anchors_agent_cwd_to_resolved_session_cwd() {
@@ -393,56 +419,6 @@ fn session_load_failed_during_open_reload_window_defers_to_window() {
         agent.scrollback.len(),
         staging_len,
         "no failure block was pushed into staging"
-    );
-}
-/// `SessionRestoreFailed` variant of the defer guard: no `TurnFailed`
-/// block may be pushed into staging and the window must stay open.
-#[test]
-fn session_restore_failed_during_open_reload_window_defers_to_window() {
-    let mut app = test_app();
-    dispatch(Action::LoadSession("sess-w".into(), None, false), &mut app);
-    let id = AgentId(0);
-    app.agents.get_mut(&id).unwrap().begin_session_reload(1);
-    let staging_len = app.agents[&id].scrollback.len();
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::SessionRestoreFailed {
-            agent_id: id,
-            error: "boom".into(),
-        }),
-        &mut app,
-    );
-    assert!(effects.is_empty());
-    let agent = app.agents.get(&id).unwrap();
-    assert!(agent.session_reload.is_some(), "the window stays open");
-    assert!(agent.session.loading_replay);
-    assert_eq!(
-        agent.scrollback.len(),
-        staging_len,
-        "no failure block was pushed into staging"
-    );
-}
-/// `SessionRestoreProgress` variant of the defer guard: no progress block
-/// may be pushed into staging.
-#[test]
-fn session_restore_progress_during_open_reload_window_defers_to_window() {
-    let mut app = test_app();
-    dispatch(Action::LoadSession("sess-w".into(), None, false), &mut app);
-    let id = AgentId(0);
-    app.agents.get_mut(&id).unwrap().begin_session_reload(1);
-    let staging_len = app.agents[&id].scrollback.len();
-    dispatch(
-        Action::TaskComplete(TaskResult::SessionRestoreProgress {
-            agent_id: id,
-            message: "Downloading...".into(),
-        }),
-        &mut app,
-    );
-    let agent = app.agents.get(&id).unwrap();
-    assert!(agent.session_reload.is_some(), "the window stays open");
-    assert_eq!(
-        agent.scrollback.len(),
-        staging_len,
-        "no progress block was pushed into staging"
     );
 }
 /// SessionLoaded path also surfaces a warning banner when the server
@@ -609,33 +585,6 @@ fn session_loaded_with_flag_emits_five_fetches_and_clears_flag() {
     );
     assert!(!app.agents[&id].pending_extensions_fetch);
 }
-#[test]
-fn session_restored_does_not_consume_flag_and_defers_to_load() {
-    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    {
-        let a = app.agents.get_mut(&id).unwrap();
-        a.session.session_id = None;
-        a.pending_extensions_fetch = true;
-        a.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::Hooks));
-    }
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::SessionRestored {
-            agent_id: id,
-            local_session_id: "s".to_string(),
-        }),
-        &mut app,
-    );
-    assert_eq!(count_extension_fetches(&effects), 0);
-    assert!(app.agents[&id].pending_extensions_fetch);
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::LoadSession { .. }))
-    );
-}
-#[test]
 fn session_load_failed_clears_flag_no_fetches() {
     use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
     let mut app = test_app_with_agent();
@@ -695,58 +644,6 @@ fn resume_known_session_id_loads_not_creates() {
             .any(|e| matches!(e, Effect::CreateSession { .. })),
         "resume must never CreateSession"
     );
-}
-/// `SessionRestored` under `--chat` refuses a non-conversation local Build row
-/// (no LoadSession; agent torn down).
-#[test]
-fn session_restored_refuses_local_build_under_chat_mode() {
-    let mut app = test_app_with_agent();
-    let id = *app.agents.keys().next().unwrap();
-    app.chat_mode = true;
-    let cwd = app.cwd.clone();
-    let session_id = format!("restored-build-{}", std::process::id());
-    let sess_dir = plant_local_build_session(&cwd, &session_id);
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::SessionRestored {
-            agent_id: id,
-            local_session_id: session_id,
-        }),
-        &mut app,
-    );
-    let _ = std::fs::remove_dir_all(&sess_dir);
-    assert!(
-        effects.is_empty(),
-        "SessionRestored must refuse Build under --chat, got {effects:?}"
-    );
-    assert!(
-        !app.agents.contains_key(&id),
-        "placeholder agent must be removed on refuse"
-    );
-}
-/// `SessionRestored` never carries a conversation-entry bit: the follow-up
-/// LoadSession stays `chat_kind: false`; the agent UI bit is sticky `--chat`.
-#[test]
-fn session_restored_load_never_sets_conversation_entry_bit() {
-    let mut app = test_app_with_agent();
-    let id = *app.agents.keys().next().unwrap();
-    app.chat_mode = true;
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::SessionRestored {
-            agent_id: id,
-            local_session_id: "restored_no_disk".into(),
-        }),
-        &mut app,
-    );
-    assert!(matches!(
-        &effects[..],
-        [Effect::LoadSession {
-            session_id,
-            chat_kind: false,
-            ..
-        }] if session_id == "restored_no_disk"
-    ));
-    let agent = app.agents.get(&id).expect("agent kept");
-    assert!(agent.chat_kind, "agent UI bit comes from sticky --chat");
 }
 /// Completing a mid-session login restores the agent view instead of
 /// running the startup load-session flow.
@@ -935,28 +832,6 @@ fn session_loaded_clears_stale_running_entries() {
         "no entries should be animating after SessionLoaded",
     );
 }
-#[test]
-fn session_restore_failed_clears_prompt_history_loading() {
-    let mut app = test_app();
-    let effects = dispatch_load_session_with_restore(&mut app, "remote-sess".into(), "/tmp".into());
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::RestoreAndLoadSession { .. }]
-    ));
-    let id = AgentId(0);
-    assert!(app.agents[&id].session.prompt_history_loading);
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::SessionRestoreFailed {
-            agent_id: id,
-            error: "boom".into(),
-        }),
-        &mut app,
-    );
-    assert!(effects.is_empty());
-    assert!(!app.agents[&id].session.prompt_history_loading);
-    assert!(!app.agents[&id].session.loading_replay);
-}
-#[test]
 fn resume_focuses_existing_agent_for_open_session() {
     let mut app = test_app();
     dispatch(Action::NewSession, &mut app);
@@ -1273,34 +1148,6 @@ fn resume_after_load_failed_reissues_load() {
     );
     assert_eq!(app.agents.len(), count_before + 1);
 }
-#[test]
-fn session_restored_clears_stale_session_id() {
-    let mut app = test_app();
-    dispatch(Action::NewSession, &mut app);
-    dispatch(
-        Action::TaskComplete(TaskResult::SessionCreated {
-            agent_id: AgentId(0),
-            session_id: "remote-sess".into(),
-            models: None,
-            scheduler_background_loops: None,
-        }),
-        &mut app,
-    );
-    dispatch(Action::NewSession, &mut app);
-    dispatch(
-        Action::TaskComplete(TaskResult::SessionRestored {
-            agent_id: AgentId(1),
-            local_session_id: "remote-sess".into(),
-        }),
-        &mut app,
-    );
-    assert_eq!(app.agents[&AgentId(0)].session.session_id, None);
-    assert_eq!(
-        app.agents[&AgentId(1)].session.session_id,
-        Some(acp::SessionId::new("remote-sess"))
-    );
-}
-#[test]
 fn minimal_new_session_queues_welcome_card() {
     let mut app = test_app();
     app.screen_mode = crate::app::ScreenMode::Minimal;
@@ -1357,23 +1204,6 @@ fn pick_conversation_row_from_welcome_dispatches_direct_chat_load() {
             }] if session_id == "conv-pick-2"
         ),
         "expected a direct chat LoadSession, got {effects:?}"
-    );
-}
-/// Canary: a remote Build row not on disk still takes the GCS-restore path.
-#[test]
-fn pick_remote_build_row_still_restores() {
-    let mut app = test_app_with_agent();
-    let id = format!("remote-only-{}", std::process::id());
-    let mut e = make_picker_entry(&id, "/r");
-    e.source = "remote".into();
-    open_session_picker_with(&mut app, vec![e]);
-    let effects = dispatch(Action::PickSession(0), &mut app);
-    assert!(
-        matches!(
-            &effects[..],
-            [Effect::RestoreAndLoadSession { session_id, .. }] if *session_id == id
-        ),
-        "expected RestoreAndLoadSession, got {effects:?}"
     );
 }
 /// A content-search hit matching a co-displayed conversation row also

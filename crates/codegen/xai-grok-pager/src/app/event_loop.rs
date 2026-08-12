@@ -18,11 +18,12 @@ use crate::theme::system_appearance::{self, SystemAppearanceWatcher};
 use crate::theme::{Theme, ThemeKind, cache as theme_cache};
 
 use agent_client_protocol as acp;
-use xai_acp_lib::acp_send;
+use xai_acp_lib::{AcpClientMessage, acp_send};
 
 use super::actions::{Action, Effect, TaskResult};
-use super::app_view::{
-    ActiveView, AppView, AuthState, InputOutcome, PasteProvenance, TrustState, VoiceState,
+use super::app_view::{ActiveView, AppView, AuthState, InputOutcome, PasteProvenance, TrustState};
+use super::session_load_barrier::{
+    AcpDrainArm, SessionLoadAcpTick, SessionLoadBarrier, session_load_agent_id,
 };
 use super::{PagerArgs, PagerTerminal, acp_handler, dispatch, effects};
 
@@ -711,8 +712,7 @@ fn run_pending_suspends(
 }
 
 /// Minimal mode opens an empty session after the welcome branch (now, or
-/// post-auth via the deferred drain), so that session create owns the
-/// startup latch.
+/// post-auth via the deferred drain), so that session create ends startup.
 fn minimal_will_open_session(term_state: &TerminalState, app: &AppView) -> bool {
     term_state.screen_mode.is_minimal()
         && matches!(app.active_view, ActiveView::Welcome)
@@ -731,6 +731,7 @@ fn minimal_will_open_session(term_state: &TerminalState, app: &AppView) -> bool 
 pub(crate) async fn run(
     terminal: &mut PagerTerminal,
     connection: crate::acp::AcpConnection,
+    pending_startup: xai_grok_telemetry::startup::PendingStartup,
     config_watcher: &mut ConfigWatcher,
     args: &PagerArgs,
     session_cwd: Option<std::path::PathBuf>,
@@ -755,6 +756,7 @@ pub(crate) async fn run(
         connection.models,
         connection.available_commands,
     );
+    app.pending_startup = Some(pending_startup);
     app.tracing_rx = Some(tracing_handle.rx);
     // Startup terminal height for the auto-compact derivation; kept fresh by
     // `Event::Resize` from here on. 0 (probe failure) never forces compact.
@@ -895,7 +897,6 @@ pub(crate) async fn run(
     app.privacy_banner_reshow_days = None;
     app.privacy_banner_acked = None;
     app.plugin_cta_enabled = false;
-    // Voice is applied after auth_meta so API-key detection is accurate.
     app.session_picker_grouped = std::env::var("GROK_SESSION_PICKER_GROUPED")
         .ok()
         .and_then(|v| match v.as_str() {
@@ -1008,24 +1009,7 @@ pub(crate) async fn run(
         app.is_api_key_auth = app.auth_methods.iter().any(|m| {
             m.id().0.as_ref() == xai_grok_shell::agent::auth_method::XAI_API_KEY_METHOD_ID
         });
-        // No AuthMeta on this path — API keys / external auth have no
-        // consumer billing surface. Local `/usage` remains available.
-        if app.is_api_key_auth || app.has_external_auth_provider {
-            app.usage_visible = false;
-            app.sync_billing_surface_to_agents();
-        }
     }
-
-    // After auth so API-key + managed policy resolve correctly.
-    // Voice/STT is a vendor-specific feature and is intentionally absent from
-    // the clean build. Keep the state plumbing for source compatibility, but
-    // never start the capture pipeline or advertise the slash command.
-    let voice_mode_enabled = false;
-    if !voice_mode_enabled {
-        app.voice_reset();
-        app.voice_ui_active = false;
-    }
-    app.apply_voice_mode_enabled(voice_mode_enabled);
 
     // Fallback: prefetch may have gate info the shell's AuthMeta missed.
     // Errs on the side of blocking if stale.
@@ -1033,13 +1017,6 @@ pub(crate) async fn run(
         && let Some(rs) = remote_settings.as_ref()
     {
         app.gate = AppView::gate_from_settings(rs);
-    }
-
-    // Re-impose the startup gate through the chokepoint: cached auth meta
-    // and the settings prefetch are both possibly stale, so a consumer
-    // session's gate is deferred for live verification before first paint.
-    if let Some(gate) = app.gate.take() {
-        post_render_effects.extend(app.impose_gate(gate));
     }
 
     // Hosted announcements, managed requirements and account policy are not
@@ -1074,22 +1051,7 @@ pub(crate) async fn run(
         app.notification_service = crate::notifications::NotificationService::new(
             crate::notifications::load_notification_config(raw),
         );
-        if let Some(table) = raw.as_table() {
-            // Voice reads only its explicit provider-neutral `[voice]` table.
-            // It never inherits chat/account endpoint settings.
-            app.voice_config = xai_grok_voice::VoiceConfig::from_config_table(table, None);
-        }
     }
-    // Stamp request-identity headers so the STT handshake attributes voice usage
-    // to grok-cli server-side (mirrors sampler / imagine). Done after
-    // `from_config_table` — which yields a fresh config with these
-    // `#[serde(skip)]` fields defaulted to empty — and unconditionally, so they
-    // apply even when there is no `[voice]` table (or no config at all).
-    app.voice_config.client_identifier = crate::client_identity::HEADLESS_CLIENT_TYPE.to_string();
-    app.voice_config.user_agent = crate::client_identity::client_user_agent();
-
-    app.zdr_access_enabled = false;
-    app.subscription_watch_interval_secs = None;
 
     // Full layered resolve (env/requirements/remote may beat plain `[ui]`).
     crate::appearance::cache::set_show_thinking_blocks(
@@ -1131,10 +1093,6 @@ pub(crate) async fn run(
                 .as_ref()
                 .and_then(|s| s.scheduler_background_loops),
         );
-
-    app.usage_billing_redirect_url = remote_settings
-        .as_ref()
-        .and_then(|s| s.usage_billing_redirect_url.clone());
 
     if app.is_access_blocked() {
         app.welcome_prompt_focused = false;
@@ -1313,22 +1271,6 @@ pub(crate) async fn run(
     // Seed `/auto` feature-gate visibility from the resolved gate (so `/auto`
     // is offered on the welcome prompt when available).
     app.sync_permission_mode_slash_gate();
-    // Settings UI language (`[ui].voice_stt_language`) overrides `[voice].language`
-    // when set. Store the preference (including client-only `auto`); the voice
-    // crate resolves the wire code at STT connect. When unset, keep whatever
-    // `from_config_table` loaded (default `en`, or an explicit `[voice].language`).
-    // Must run after `load_initial_ui_config()` hydrates `current_ui` from disk.
-    if let Some(ref pref) = app.current_ui.voice_stt_language {
-        app.voice_config.language =
-            crate::settings::canonical_voice_stt_language(Some(pref)).to_string();
-    }
-    // Seed the Voice shortcut gate's process-global mirror for key-routing and
-    // view code without an `AppView`; the chord intercept reads `current_ui`
-    // live and the settings setter updates both.
-    crate::app::VOICE_KEYBIND_ENABLED.store(
-        app.current_ui.voice_keybind_enabled.unwrap_or(true),
-        std::sync::atomic::Ordering::Release,
-    );
     // Resolve the per-tip contextual hints now that `current_ui` is hydrated and
     // propagate the prompt-relevant tips to any agents built at startup. New
     // agents adopt the gates at creation; settings toggles re-apply at runtime.
@@ -1475,17 +1417,8 @@ pub(crate) async fn run(
     let connection_cancel = connection.cancel;
     let mut leader_status_rx = connection.leader_status_rx;
     let mut tasks: JoinSet<TaskResult> = JoinSet::new();
-    let (progress_tx, mut progress_rx) =
-        tokio::sync::mpsc::unbounded_channel::<effects::RestoreProgressMsg>();
-
-    // Voice STT pipeline is started lazily on first successful `/voice` (see
-    // `VoiceState::ColdStart`), not at launch — avoids background work for users
-    // who never enable voice mode. `AUDIO_SUPPORTED` reflects whether mic
-    // capture is compiled in: true for production CLI builds on macOS/Windows
-    // (cpal) and Linux (subprocess recorder), false for Bazel builds (no
-    // capture in the test sandbox).
-    let mut voice_rx = None::<tokio::sync::mpsc::Receiver<xai_grok_voice::VoiceEvent>>;
-    let voice_auth_factory = connection.auth_manager.clone();
+    let mut session_load_barrier = SessionLoadBarrier::new();
+    let mut acp_peek: Option<AcpClientMessage> = None;
 
     // Animation tick: only scheduled when there are running entries.
     let mut tick_interval = tick_interval;
@@ -1495,20 +1428,6 @@ pub(crate) async fn run(
     // currently pushed for the /gboom game. Synced to `gboom_active` each
     // iteration so it is popped on every close path.
     let mut gboom_keyboard_pushed = false;
-
-    const BILLING_POLL_INTERVAL: Duration = Duration::from_secs(30);
-    let mut billing_poll_at: Option<Instant> = None;
-
-    const GATE_POLL_INTERVAL: Duration = Duration::from_secs(30);
-    let mut gate_poll_at: Option<Instant> = None;
-
-    // Free→paid subscription watch (see `app::subscription`).
-    let mut subscription_watch_at: Option<Instant> = if app.subscription_watch_wanted() {
-        app.subscription_watch_interval()
-            .map(|iv| Instant::now() + iv)
-    } else {
-        None
-    };
 
     // Leader-mode roster poll (FleetView dashboard). Only fires while the
     // dashboard is open AND we're connected via a leader. Armed to fire
@@ -1544,31 +1463,20 @@ pub(crate) async fn run(
     // status only; shell auto-syncs post-auth
     if matches!(app.auth_state, AuthState::Done) {
         let effs = dispatch::dispatch(Action::RequestBundleStatus, &mut app);
-        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-            return Ok(make_run_result(&app));
-        }
-        // Fetch billing early so the welcome screen can show a credit warning.
-        if app.usage_visible {
-            let effs = vec![super::actions::Effect::FetchAppBilling];
-            if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                return Ok(make_run_result(&app));
-            }
+        if process_effects(effs, &mut tasks, &mut app) {
+            return Ok(finish_run(&mut app));
         }
         // Fetch changelog off the render path so the welcome screen
         // can display bullets and /release-notes uses the cached result.
         let effs = vec![super::actions::Effect::FetchChangelog];
-        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-            return Ok(make_run_result(&app));
-        }
-        if !app.has_access() {
-            gate_poll_at = Some(Instant::now() + GATE_POLL_INTERVAL);
+        if process_effects(effs, &mut tasks, &mut app) {
+            return Ok(finish_run(&mut app));
         }
     }
 
-    if !post_render_effects.is_empty()
-        && process_effects(post_render_effects, &mut tasks, &mut app, &progress_tx)
+    if !post_render_effects.is_empty() && process_effects(post_render_effects, &mut tasks, &mut app)
     {
-        return Ok(make_run_result(&app));
+        return Ok(finish_run(&mut app));
     }
 
     // Session startup from pre-materialized CLI intent.
@@ -1659,8 +1567,8 @@ pub(crate) async fn run(
 
     if let Some(action) = startup_action {
         let effs = dispatch::dispatch(action, &mut app);
-        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-            return Ok(make_run_result(&app));
+        if process_effects(effs, &mut tasks, &mut app) {
+            return Ok(finish_run(&mut app));
         }
         presenter.request_presentation(&mut app, terminal, false);
     } else if args.worktree.is_some() {
@@ -1673,13 +1581,13 @@ pub(crate) async fn run(
             },
             &mut app,
         );
-        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-            return Ok(make_run_result(&app));
+        if process_effects(effs, &mut tasks, &mut app) {
+            return Ok(finish_run(&mut app));
         }
         presenter.request_presentation(&mut app, terminal, false);
     } else if args.initial_prompt().is_none() && !minimal_will_open_session(&term_state, &app) {
-        // No session work follows: latch at interactive.
-        xai_grok_telemetry::startup::report_total(xai_grok_telemetry::startup::StartupOutcome::Ok);
+        // No session work follows: startup ends at interactive.
+        app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Ok);
     }
 
     // Initial prompt from the CLI positional (`grok "fix the bug"`). When
@@ -1693,15 +1601,13 @@ pub(crate) async fn run(
             app.deferred_startup.prompt = Some(initial_prompt.to_string());
         } else if !app.is_zdr_blocked() {
             let effs = dispatch::dispatch_initial_prompt(&mut app, initial_prompt.to_string());
-            if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                return Ok(make_run_result(&app));
+            if process_effects(effs, &mut tasks, &mut app) {
+                return Ok(finish_run(&mut app));
             }
             presenter.request_presentation(&mut app, terminal, false);
         } else {
-            // ZDR drops the prompt; no session will latch, so latch at interactive.
-            xai_grok_telemetry::startup::report_total(
-                xai_grok_telemetry::startup::StartupOutcome::Ok,
-            );
+            // ZDR drops the prompt; no session follows, so startup ends at interactive.
+            app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Ok);
         }
     }
 
@@ -1721,8 +1627,8 @@ pub(crate) async fn run(
         }
         if app.session_startup_allowed() {
             let effs = dispatch::dispatch(Action::OpenDashboard, &mut app);
-            if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                return Ok(make_run_result(&app));
+            if process_effects(effs, &mut tasks, &mut app) {
+                return Ok(finish_run(&mut app));
             }
             presenter.request_presentation(&mut app, terminal, false);
         } else {
@@ -1746,8 +1652,8 @@ pub(crate) async fn run(
             // Already authenticated + trusted: open the empty session now so the
             // user lands directly at the prompt.
             let effs = dispatch::dispatch(Action::NewSession, &mut app);
-            if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                return Ok(make_run_result(&app));
+            if process_effects(effs, &mut tasks, &mut app) {
+                return Ok(finish_run(&mut app));
             }
             presenter.request_presentation(&mut app, terminal, false);
         } else {
@@ -1763,9 +1669,9 @@ pub(crate) async fn run(
 
     // Startup intents are now fully classified; only an untouched welcome can nudge.
     if let Some(effect) = app.begin_foreign_resume_detection()
-        && process_effects(vec![effect], &mut tasks, &mut app, &progress_tx)
+        && process_effects(vec![effect], &mut tasks, &mut app)
     {
-        return Ok(make_run_result(&app));
+        return Ok(finish_run(&mut app));
     }
 
     // Schedule the first animation tick so live updates start immediately
@@ -1819,12 +1725,41 @@ pub(crate) async fn run(
     crate::app::signal_handler::set_quit_notify(quit_notify.clone());
 
     loop {
-        // Pending $EDITOR / $PAGER suspends first: they can be armed by ANY
-        // arm of the select below (input, ticks — e.g. minimal's incremental
-        // /transcript build finishing inside a tick draw — tasks, ACP), so
-        // consuming them here keeps the handoff immediate instead of waiting
-        // for the next unrelated event.
-        run_pending_suspends(
+        if !session_load_barrier.is_empty() && acp_peek.is_none() {
+            acp_peek = acp_rx.try_recv().ok();
+        }
+        let ready_loads = session_load_barrier.take_ready(
+            |id| {
+                app.agents
+                    .get(&id)
+                    .is_some_and(|a| a.session.loading_replay)
+            },
+            SessionLoadAcpTick {
+                head: acp_peek.as_ref(),
+                drain_arm: AcpDrainArm::from_input_rx_empty(input_rx.is_empty()),
+                now: std::time::Instant::now(),
+            },
+        );
+        let mut quit_after_deferred_load = false;
+        for result in ready_loads {
+            let effs = dispatch::dispatch(Action::TaskComplete(result), &mut app);
+            if process_effects(effs, &mut tasks, &mut app) {
+                quit_after_deferred_load = true;
+                break;
+            }
+            after_task_complete_dispatch(
+                &app,
+                &mut animation_tick_at,
+                tick_interval,
+                &mut resize_debounce_at,
+                &mut presenter,
+            );
+        }
+        if quit_after_deferred_load {
+            break;
+        }
+
+        if let Err(e) = run_pending_suspends(
             &mut app,
             terminal,
             &input_paused,
@@ -1833,61 +1768,10 @@ pub(crate) async fn run(
             &mut presenter,
             &mut suspend_retry_after,
             &mut suspend_wait_reports,
-        )?;
-
-        // Lazy voice pipeline: only after `/voice` or Ctrl+Space while gates
-        // allow. Consume the queued cold-start, carrying its hold-ownership and
-        // bound target forward into the live recording it spawns.
-        if let VoiceState::ColdStart { hold, target } = app.voice_state {
-            if app.voice_cmd_tx.is_none() && app.voice_can_start_pipeline() {
-                let voice_auth = crate::voice::build_voice_auth(voice_auth_factory.clone());
-                let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
-                let (event_tx, event_rx) = tokio::sync::mpsc::channel(128);
-                let voice_config = app.voice_config.clone();
-                tokio::spawn(xai_grok_voice::run_voice_pipeline(
-                    voice_config,
-                    voice_auth.clone(),
-                    cmd_rx,
-                    event_tx,
-                ));
-                app.voice_auth = Some(voice_auth);
-                app.voice_cmd_tx = Some(cmd_tx);
-                voice_rx = Some(event_rx);
-                tracing::info!("voice pipeline started (/voice or Ctrl+Space)");
-                // The spawn is async, so begin capture now the pipeline is live
-                // — but only if the user is still on a surface that can receive
-                // dictation (an agent prompt or the dashboard dispatch input).
-                // This runs at loop-top before any new input, so the surface
-                // normally can't have changed since the keypress; the else-arm
-                // is defensive cleanup so voice mode can't stay armed without
-                // capture ever starting.
-                if matches!(
-                    app.active_view,
-                    ActiveView::Agent(_) | ActiveView::AgentDashboard
-                ) {
-                    app.voice_begin_recording(target, hold);
-                } else {
-                    app.voice_state = VoiceState::Idle;
-                    app.voice_ui_active = false;
-                }
-            } else if app.voice_cmd_tx.is_none() {
-                app.voice_state = VoiceState::Idle;
-                app.voice_ui_active = false;
-                app.show_toast("Voice could not start. Restart XAICode.");
-            } else {
-                // Defensive: a queued start with the pipeline already up (which
-                // shouldn't occur) — drop it so we don't re-enter every tick.
-                app.voice_state = VoiceState::Idle;
-            }
-            // The lazy spawn runs at loop-top, after the key/slash arm already
-            // drew (with capture still off). Render now so the recording banner
-            // appears immediately instead of waiting for the next input or
-            // network event to wake the select! loop.
-            presenter.request_presentation(&mut app, terminal, false);
+        ) {
+            app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Error);
+            return Err(e);
         }
-
-        // Stop voice if the user has left the recording session (see method).
-        app.enforce_voice_session_bound();
 
         // Keep the /gboom keyboard layer in sync with whether the game is
         // open, so WASD emit releases while it runs and the layer is popped
@@ -1919,15 +1803,6 @@ pub(crate) async fn run(
         // local on-disk idle-session list.
         if roster_poll_at.is_none() && matches!(app.active_view, ActiveView::AgentDashboard) {
             roster_poll_at = Some(Instant::now());
-        }
-
-        // (Re-)arm the subscription watch on the dormant→wanted transition
-        // and after each fired tick.
-        if subscription_watch_at.is_none()
-            && app.subscription_watch_wanted()
-            && let Some(iv) = app.subscription_watch_interval()
-        {
-            subscription_watch_at = Some(Instant::now() + iv);
         }
 
         // Future that sleeps until the next animation tick, or waits forever if none.
@@ -1990,27 +1865,6 @@ pub(crate) async fn run(
             }
         };
 
-        let billing_poll = async {
-            match billing_poll_at {
-                Some(at) => sleep_until(at).await,
-                None => std::future::pending().await,
-            }
-        };
-
-        let gate_poll = async {
-            match gate_poll_at {
-                Some(at) => sleep_until(at).await,
-                None => std::future::pending().await,
-            }
-        };
-
-        let subscription_watch = async {
-            match subscription_watch_at {
-                Some(at) => sleep_until(at).await,
-                None => std::future::pending().await,
-            }
-        };
-
         let roster_poll = async {
             match roster_poll_at {
                 Some(at) => sleep_until(at).await,
@@ -2021,6 +1875,18 @@ pub(crate) async fn run(
         let recap_poll = async {
             match recap_poll_at {
                 Some(at) => sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+
+        let load_barrier_tick = async {
+            match session_load_barrier.next_wakeup() {
+                Some(deadline) => {
+                    tokio::time::sleep(
+                        deadline.saturating_duration_since(std::time::Instant::now()),
+                    )
+                    .await;
+                }
                 None => std::future::pending().await,
             }
         };
@@ -2039,22 +1905,29 @@ pub(crate) async fn run(
             // biased order so a SIGTERM quit isn't starved by an ACP firehose.
             _ = quit_notify.notified() => {
                 let effs = dispatch::dispatch(Action::Quit, &mut app);
-                let _ = process_effects(effs, &mut tasks, &mut app, &progress_tx);
+                let _ = process_effects(effs, &mut tasks, &mut app);
                 break;
             }
 
             writer_event = writer_event_rx.recv() => {
                 let Some(writer_event) = writer_event else {
+                    app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Error);
                     return Err(anyhow::anyhow!("terminal writer stopped"));
                 };
-                let sequence = writer_event_sequence(writer_event)
-                    .context("terminal output failed")?;
+                let sequence = match writer_event_sequence(writer_event)
+                    .context("terminal output failed")
+                {
+                    Ok(sequence) => sequence,
+                    Err(e) => {
+                        app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Error);
+                        return Err(e);
+                    }
+                };
                 presenter.acknowledge(sequence);
             }
 
             // Biased order: cancellation/quit, writer acks/failures, ACP,
-            // task/progress results, updates, input, and render/poll timers all
-            // precede the deliberately-last voice STT arm (see its note below).
+            // task/progress results, updates, input, and render/poll timers.
 
             // Gated on empty terminal input: a token firehose keeps this arm
             // ready at every biased poll, so without the gate buffered
@@ -2065,12 +1938,17 @@ pub(crate) async fn run(
             // Gating, not reordering: moving input above ACP would flip the
             // starvation direction (streaming redraws starving behind held
             // keys), and cancel/quit must stay above the firehose regardless.
-            msg = acp_rx.recv(), if input_rx.is_empty() => {
+            msg = async {
+                match acp_peek.take() {
+                    Some(msg) => Some(msg),
+                    None => acp_rx.recv().await,
+                }
+            }, if input_rx.is_empty() => {
                 let Some(msg) = msg else { break };
                 let mut state_changed = acp_handler::handle(msg, &mut app);
                 if !app.pending_effects.is_empty() {
                     let effs = std::mem::take(&mut app.pending_effects);
-                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                    if process_effects(effs, &mut tasks, &mut app) {
                         break;
                     }
                 }
@@ -2088,8 +1966,8 @@ pub(crate) async fn run(
                     state_changed |= acp_handler::handle(msg, &mut app);
                     if !app.pending_effects.is_empty() {
                         let effs = std::mem::take(&mut app.pending_effects);
-                        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                            return Ok(make_run_result(&app));
+                        if process_effects(effs, &mut tasks, &mut app) {
+                            return Ok(finish_run(&mut app));
                         }
                     }
                 }
@@ -2109,26 +1987,37 @@ pub(crate) async fn run(
             Some(join_result) = tasks.join_next() => {
                 match join_result {
                     Ok(result) => {
+                        let agent_loading = session_load_agent_id(&result)
+                            .is_some_and(|id| {
+                                app.agents
+                                    .get(&id)
+                                    .is_some_and(|a| a.session.loading_replay)
+                            });
+                        if agent_loading && acp_peek.is_none() {
+                            acp_peek = acp_rx.try_recv().ok();
+                        }
+                        let Some(result) = session_load_barrier.push_or_dispatch(
+                            result,
+                            agent_loading,
+                            SessionLoadAcpTick {
+                                head: acp_peek.as_ref(),
+                                drain_arm: AcpDrainArm::from_input_rx_empty(input_rx.is_empty()),
+                                now: std::time::Instant::now(),
+                            },
+                        ) else {
+                            continue;
+                        };
                         let effs = dispatch::dispatch(Action::TaskComplete(result), &mut app);
-                        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                        if process_effects(effs, &mut tasks, &mut app) {
                             break;
                         }
-                        schedule_tick(&mut animation_tick_at, &app, tick_interval);
-                        resize_debounce_at = None;
-
-                        // Schedule/clear poll timers.
-                        if app.billing_poll_wanted && billing_poll_at.is_none() {
-                            billing_poll_at = Some(Instant::now() + BILLING_POLL_INTERVAL);
-                        } else if !app.billing_poll_wanted {
-                            billing_poll_at = None;
-                        }
-                        if !app.has_access() && gate_poll_at.is_none() {
-                            gate_poll_at = Some(Instant::now() + GATE_POLL_INTERVAL);
-                        } else if app.has_access() {
-                            gate_poll_at = None;
-                        }
-
-                        presenter.request(false);
+                        after_task_complete_dispatch(
+                            &app,
+                            &mut animation_tick_at,
+                            tick_interval,
+                            &mut resize_debounce_at,
+                            &mut presenter,
+                        );
                     }
                     Err(join_err) => {
                         // Task was aborted (e.g., auth cancel) or panicked.
@@ -2141,24 +2030,12 @@ pub(crate) async fn run(
                 }
             }
 
-            Some(msg) = progress_rx.recv() => {
-                let result = TaskResult::SessionRestoreProgress {
-                    agent_id: msg.agent_id,
-                    message: msg.message,
-                };
-                let effs = dispatch::dispatch(Action::TaskComplete(result), &mut app);
-                if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                    break;
-                }
-                presenter.request(false);
-            }
-
             maybe_ev = input_rx.recv() => {
                 // Terminal events arrive via the dedicated reader thread set up
                 // near the top of this function. `None` means that thread ended.
                 let Some(ev) = maybe_ev else { break };
                 let result = drain_and_process(
-                    ev, &mut input_rx, &mut app, &mut tasks, &progress_tx,
+                    ev, &mut input_rx, &mut app, &mut tasks,
                     &mut csi_filter, &mut xt_filter,
                 ).await;
                 if result.should_quit {
@@ -2166,7 +2043,7 @@ pub(crate) async fn run(
                 }
                 if !app.pending_effects.is_empty() {
                     let effs = std::mem::take(&mut app.pending_effects);
-                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                    if process_effects(effs, &mut tasks, &mut app) {
                         break;
                     }
                 }
@@ -2238,7 +2115,7 @@ pub(crate) async fn run(
                 // `needs_animation()` keeps ticks alive while either recovery
                 // is armed, so these checks cannot be starved.
                 if let Some(resends) = dispatch::reconcile_overdue_cancels(&mut app)
-                    && process_effects(resends, &mut tasks, &mut app, &progress_tx)
+                    && process_effects(resends, &mut tasks, &mut app)
                 {
                     break;
                 }
@@ -2248,7 +2125,7 @@ pub(crate) async fn run(
                 // (see `dispatch::reconcile_overdue_turn_ends`).
                 let reconciled = dispatch::reconcile_overdue_turn_ends(&mut app);
                 if let Some(effs) = reconciled {
-                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                    if process_effects(effs, &mut tasks, &mut app) {
                         break;
                     }
                     presenter.request(false);
@@ -2258,42 +2135,6 @@ pub(crate) async fn run(
                 // Keep ticking as long as there are running animations
                 // or pending actions waiting to expire.
                 schedule_tick(&mut animation_tick_at, &app, tick_interval);
-            }
-
-            _ = billing_poll => {
-                billing_poll_at = None;
-                if let ActiveView::Agent(id) = app.active_view {
-                    let effs = vec![Effect::FetchBilling {
-                        agent_id: id,
-                        silent: true,
-                        nonce: 0,
-                    }];
-                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                        break;
-                    }
-                }
-                if app.billing_poll_wanted {
-                    billing_poll_at = Some(Instant::now() + BILLING_POLL_INTERVAL);
-                }
-            }
-
-            _ = gate_poll => {
-                gate_poll_at = None;
-                let effs = vec![Effect::RefreshGate];
-                if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                    break;
-                }
-                if !app.has_access() {
-                    gate_poll_at = Some(Instant::now() + GATE_POLL_INTERVAL);
-                }
-            }
-
-            _ = subscription_watch => {
-                subscription_watch_at = None;
-                let effs = app.fire_subscription_check("watch");
-                if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                    break;
-                }
             }
 
             _ = roster_poll => {
@@ -2310,7 +2151,7 @@ pub(crate) async fn run(
                     } else {
                         Effect::FetchDashboardSessions
                     };
-                    if process_effects(vec![eff], &mut tasks, &mut app, &progress_tx) {
+                    if process_effects(vec![eff], &mut tasks, &mut app) {
                         break;
                     }
                     roster_poll_at = Some(Instant::now() + ROSTER_POLL_INTERVAL);
@@ -2322,13 +2163,15 @@ pub(crate) async fn run(
             _ = recap_poll => {
                 if should_pregenerate_away_recap(&app) {
                     let effs = dispatch::dispatch(Action::SendRecap { auto: true }, &mut app);
-                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                    if process_effects(effs, &mut tasks, &mut app) {
                         break;
                     }
                 }
                 // Always re-arm: a cheap no-op fire while focused / not-yet-eligible.
                 recap_poll_at = Some(Instant::now() + RECAP_POLL_INTERVAL);
             }
+
+            _ = load_barrier_tick => {}
 
             // Hot-reload: config file changed (dev mode) or initial load.
             Ok(()) = config_watcher.changed() => {
@@ -2705,59 +2548,12 @@ pub(crate) async fn run(
                 // an unrestored session would be wrong.
                 if active_restored {
                     let drain_effects = dispatch::dispatch(Action::DrainQueue, &mut app);
-                    if process_effects(drain_effects, &mut tasks, &mut app, &progress_tx) {
-                        return Ok(make_run_result(&app));
+                    if process_effects(drain_effects, &mut tasks, &mut app) {
+                        return Ok(finish_run(&mut app));
                     }
                 }
 
                 presenter.request(false);
-            }
-
-            // Voice STT — DELIBERATELY THE LAST (lowest-priority) arm. In a
-            // biased select, an arm that is ready on most iterations masks every
-            // arm below it. A hot mic (toggle capture stays open across pauses)
-            // streams interim transcripts at ~5–20 Hz and can backlog the 128-slot
-            // channel during a burst, so `voice_rx` is effectively always-ready.
-            // Keeping it last guarantees it can never starve cancellation, the ACP
-            // stream, task/progress completions, keyboard input, or the render/
-            // animation/poll timers — voice is only serviced when nothing else is
-            // pending. Draw throttle uses min_draw_interval.
-            ev = async {
-                match voice_rx.as_mut() {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                match ev {
-                    Some(ev) => {
-                        let needs_draw = crate::voice::handle_voice_event(&mut app, ev);
-                        if needs_draw {
-                            schedule_tick(&mut animation_tick_at, &app, tick_interval);
-                            let now = Instant::now();
-                            if presenter.request_throttled(now, min_draw_interval) {
-                                app.update_notifications();
-                            }
-                        }
-                        if !app.pending_effects.is_empty() {
-                            let effs = std::mem::take(&mut app.pending_effects);
-                            if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                                break;
-                            }
-                        }
-                    }
-                    // Closed channel: revert to pending() (avoid hot-loop on None).
-                    None => {
-                        voice_rx = None;
-                        let was_listening = app.voice_listening();
-                        app.voice_cmd_tx = None;
-                        // Pipeline is gone: drop any session/interim entirely.
-                        app.voice_reset();
-                        if was_listening {
-                            app.show_toast("Voice stopped unexpectedly. Try again.");
-                        }
-                        presenter.request(false);
-                    }
-                }
             }
         }
 
@@ -2766,7 +2562,7 @@ pub(crate) async fn run(
 
     app.notification_service.shutdown();
 
-    Ok(make_run_result(&app))
+    Ok(finish_run(&mut app))
 }
 
 /// Load `UiConfig` from the shell's layered config at startup.
@@ -2849,6 +2645,19 @@ fn should_pregenerate_away_recap(app: &AppView) -> bool {
     })
 }
 
+/// Bookkeeping shared by the JoinSet arm and the deferred SessionLoaded drain.
+fn after_task_complete_dispatch(
+    app: &AppView,
+    animation_tick_at: &mut Option<Instant>,
+    tick_interval: Duration,
+    resize_debounce_at: &mut Option<Instant>,
+    presenter: &mut Presenter,
+) {
+    schedule_tick(animation_tick_at, app, tick_interval);
+    *resize_debounce_at = None;
+    presenter.request(false);
+}
+
 /// Schedule the next animation tick when demanded and none is pending.
 fn schedule_tick(tick_at: &mut Option<Instant>, app: &AppView, interval: Duration) {
     if tick_at.is_none() {
@@ -2879,18 +2688,10 @@ fn sync_appearance_watcher(watcher: &mut Option<SystemAppearanceWatcher>) {
     }
 }
 
-/// Build [`ExitInfo`] from the active agent's session (if any).
-///
-/// Sole construction site of [`super::ExitSummary`]: fullscreen quits only
-/// (leaving the alt screen wipes the transcript; inline/minimal quits keep it
-/// visible in native scrollback), and only with at least one conversation
-/// line (a bare title is noise). Deliberately the root agent even when a
-/// subagent view is focused — `--resume` restores the root session, and a
-/// subagent's latest "prompt" is the parent's task brief, not user input.
-///
-/// `exit_info` is only consumed on the plain-quit path; a pending `relaunch`
-/// short-circuits before it is read and carries its own session id.
-fn make_run_result(app: &AppView) -> RunResult {
+/// Exit funnel: releases the startup obligation and builds [`ExitInfo`].
+/// Summaries are fullscreen-only and always read the root agent.
+fn finish_run(app: &mut AppView) -> RunResult {
+    app.abandon_startup();
     let exit_info = app.active_agent().and_then(|agent| {
         let sid = agent.session.session_id.as_ref()?;
         let summary = if app.screen_mode.is_fullscreen() {
@@ -2988,7 +2789,6 @@ async fn drain_and_process(
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TimedInputEvent>,
     app: &mut AppView,
     tasks: &mut JoinSet<TaskResult>,
-    progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
     csi_filter: &mut super::csi_filter::CsiFragmentFilter,
     xt_filter: &mut super::xt_filter::XtversionFilter,
 ) -> DrainResult {
@@ -3066,12 +2866,6 @@ async fn drain_and_process(
                 {
                     crate::clipboard::prewarm_image_probe();
                 }
-                // The user may have just subscribed in the browser and
-                // tabbed back.
-                let effs = app.fire_subscription_check("focus");
-                if process_effects(effs, tasks, app, progress_tx) {
-                    return true;
-                }
                 // Restore Prompt on refocus: needs-input overlay always, else idle non-vim.
                 match app.active_view {
                     ActiveView::Agent(id) => {
@@ -3100,7 +2894,7 @@ async fn drain_and_process(
                                 crate::app::actions::Action::SendRecap { auto: true },
                                 app,
                             );
-                            if process_effects(effs, tasks, app, progress_tx) {
+                            if process_effects(effs, tasks, app) {
                                 return true;
                             }
                             needs_draw = true;
@@ -3134,47 +2928,6 @@ async fn drain_and_process(
             }
             _ => {}
         }
-        // Voice capture chord (Ctrl+Space or F8), handled here before normal
-        // routing so the release reaches us and the key never lands as text.
-        // Hold-to-talk where releases are reported (press records, release
-        // stops), else tap toggle. A release is only ours when a hold session
-        // owns it, so a bare Space release (Ctrl lifted first) stops
-        // hold-to-talk without eating every Space release during normal typing.
-        // `[ui].voice_keybind_enabled` (read live, like `voice_capture_mode`)
-        // silences chord presses without touching `/voice` — see
-        // `voice_chord_claims_event` for the exact press/release/hold gating.
-        if let Event::Key(ke) = ev
-            && app.voice_mode_enabled
-            && xai_grok_voice::AUDIO_SUPPORTED
-            && is_voice_chord(ke)
-            && voice_chord_claims_event(
-                ke.kind,
-                app.current_ui.voice_keybind_enabled.unwrap_or(true),
-                app.voice_hold_owned(),
-            )
-        {
-            // Hold-to-talk only when selected AND the terminal reports key
-            // releases (Kitty protocol); otherwise fall back to a tap toggle.
-            let hold_mode = crate::settings::canonical_voice_capture_mode(
-                app.current_ui.voice_capture_mode.as_deref(),
-            ) == "hold";
-            let action = voice_chord_action(
-                hold_mode,
-                crate::app::kitty_releases_reported(),
-                ke.kind,
-                app.voice_listening(),
-                app.voice_hold_owned(),
-            );
-            if let Some(action) = action {
-                let effs = dispatch::dispatch(action, app);
-                if process_effects(effs, tasks, app, progress_tx) {
-                    return true;
-                }
-                needs_draw = true;
-                had_non_resize_change = true;
-            }
-            return false;
-        }
         let is_resize = matches!(ev, Event::Resize(_, _));
         match app.handle_input_at_with_paste_provenance(
             ev,
@@ -3183,7 +2936,7 @@ async fn drain_and_process(
         ) {
             InputOutcome::Action(action) => {
                 let effs = dispatch::dispatch(action, app);
-                if process_effects(effs, tasks, app, progress_tx) {
+                if process_effects(effs, tasks, app) {
                     return true;
                 }
                 needs_draw = true;
@@ -3194,7 +2947,7 @@ async fn drain_and_process(
                 // the same event through the now-active view so the input
                 // (character, paste) lands in the session's prompt.
                 let effs = dispatch::dispatch(action, app);
-                if process_effects(effs, tasks, app, progress_tx) {
+                if process_effects(effs, tasks, app) {
                     return true;
                 }
                 if let InputOutcome::Action(follow_up) = app.handle_input_at_with_paste_provenance(
@@ -3203,7 +2956,7 @@ async fn drain_and_process(
                     routed.paste_provenance,
                 ) {
                     let effs = dispatch::dispatch(follow_up, app);
-                    if process_effects(effs, tasks, app, progress_tx) {
+                    if process_effects(effs, tasks, app) {
                         return true;
                     }
                 }
@@ -3214,11 +2967,11 @@ async fn drain_and_process(
                 // Dispatch both in order; first must fully resolve
                 // before second (e.g. revert preview then open reset).
                 let effs = dispatch::dispatch(first, app);
-                if process_effects(effs, tasks, app, progress_tx) {
+                if process_effects(effs, tasks, app) {
                     return true;
                 }
                 let effs = dispatch::dispatch(second, app);
-                if process_effects(effs, tasks, app, progress_tx) {
+                if process_effects(effs, tasks, app) {
                     return true;
                 }
                 needs_draw = true;
@@ -3374,64 +3127,6 @@ fn is_pasteable_key_event(ev: &Event) -> bool {
     }
 }
 
-/// Map a voice-chord key event to its action (pure, so it's unit-testable).
-///
-/// Hold mode is press-to-record / release-to-stop, but only a hold-*owned*
-/// session stops on release; a `/voice`/toggle session (not hold-owned) has no
-/// release of its own, so a press toggles it off. Elsewhere it's a tap toggle.
-fn voice_chord_action(
-    hold_mode: bool,
-    releases_reported: bool,
-    kind: KeyEventKind,
-    listening: bool,
-    hold_owned: bool,
-) -> Option<crate::app::actions::Action> {
-    use crate::app::actions::Action;
-    if hold_mode && releases_reported {
-        match kind {
-            KeyEventKind::Press if !listening => Some(Action::EnableVoiceMode),
-            KeyEventKind::Press if !hold_owned => Some(Action::VoiceToggle),
-            KeyEventKind::Release => Some(Action::VoiceStop),
-            _ => None, // repeat while a hold is held, or press of a hold-owned session
-        }
-    } else if kind == KeyEventKind::Press {
-        Some(Action::VoiceToggle)
-    } else {
-        None
-    }
-}
-
-/// Whether the event-loop intercept claims a voice-chord key event (pure for
-/// unit tests).
-///
-/// An active hold session owns its chord events end-to-end regardless of the
-/// Voice shortcut setting — its release only ever stops capture, so flipping
-/// the setting off mid-hold must not orphan it and wedge the mic open.
-/// Outside a hold, a bare release is never ours (normal typing) and a press
-/// honors the setting; an unclaimed press falls through to normal routing,
-/// where `ActionId::VoiceToggle` resolution is gated on the same setting.
-fn voice_chord_claims_event(kind: KeyEventKind, keybind_enabled: bool, hold_owned: bool) -> bool {
-    if hold_owned {
-        return true;
-    }
-    kind != KeyEventKind::Release && keybind_enabled
-}
-
-/// The voice-capture chord: **Ctrl+Space** or **F8**. A press needs the exact
-/// chord (matching the registry, so Shift+F8 / Ctrl+Alt+Space don't fire); a
-/// release matches the key alone (Space/F8), since on Kitty the Ctrl release can
-/// precede Space and drop the CONTROL bit. Callers gate release handling on an
-/// owning hold session, so a stray bare release is a no-op.
-fn is_voice_chord(ke: &KeyEvent) -> bool {
-    match ke.kind {
-        KeyEventKind::Release => matches!(ke.code, KeyCode::Char(' ') | KeyCode::F(8)),
-        _ => {
-            (ke.code == KeyCode::Char(' ') && ke.modifiers == KeyModifiers::CONTROL)
-                || (ke.code == KeyCode::F(8) && ke.modifiers.is_empty())
-        }
-    }
-}
-
 /// Coalesce runs of rapid key events into synthetic `Event::Paste`
 /// events. On terminals without bracketed paste, pasted text arrives
 /// as individual key events; Enter keys mid-run would otherwise
@@ -3471,14 +3166,11 @@ fn coalesce_rapid_keys(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
         };
     }
 
-    // Remove Release events — handlers ignore them and they'd break run
-    // detection. Exception: voice-chord releases (needed for hold-to-talk).
+    // Remove Release events — ordinary handlers ignore them and they'd break
+    // paste-run detection.
     let events: Vec<TimedInputEvent> = events
         .into_iter()
-        .filter(|ev| {
-            !matches!(&ev.event, Event::Key(ke)
-                if ke.kind == KeyEventKind::Release && !is_voice_chord(ke))
-        })
+        .filter(|ev| !matches!(&ev.event, Event::Key(ke) if ke.kind == KeyEventKind::Release))
         .collect();
 
     let mut result = Vec::with_capacity(events.len());
@@ -3649,9 +3341,7 @@ pub(crate) fn welcome_history_build_bypass_applies(
     flag && effs.iter().any(|e| {
         matches!(
             e,
-            Effect::LoadSession { .. }
-                | Effect::RestoreAndLoadSession { .. }
-                | Effect::CreateWorktreeSession { .. }
+            Effect::LoadSession { .. } | Effect::CreateWorktreeSession { .. }
         )
     })
 }
@@ -3769,11 +3459,10 @@ fn process_effects(
     effs: Vec<super::actions::Effect>,
     tasks: &mut JoinSet<TaskResult>,
     app: &mut AppView,
-    progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
 ) -> bool {
     let flags = session_flags_for_effects(app, &effs);
     for eff in effs {
-        let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags, progress_tx);
+        let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags);
         // Install auth abort handle if the current auth state still matches.
         if let Some((seq, abort_handle)) = meta.auth_abort_handle
             && let super::app_view::AuthState::Authenticating {
@@ -3949,107 +3638,6 @@ mod tests {
             },
         );
         assert!(tty_suspend_armed(&app));
-    }
-
-    // ── is_voice_chord ───────────────────────────────────────────────────
-
-    #[test]
-    fn is_voice_chord_press_exact_release_keycode() {
-        use KeyEventKind::{Press, Release};
-        let hit = |code, mods, kind| {
-            is_voice_chord(&KeyEvent {
-                code,
-                modifiers: mods,
-                kind,
-                state: KeyEventState::NONE,
-            })
-        };
-        let (sp, f8, ctrl, none) = (
-            KeyCode::Char(' '),
-            KeyCode::F(8),
-            KeyModifiers::CONTROL,
-            KeyModifiers::NONE,
-        );
-        // Press: exact chord only — stray mods / bare Space don't fire (Thread 4).
-        assert!(hit(sp, ctrl, Press) && hit(f8, none, Press));
-        assert!(!hit(sp, ctrl | KeyModifiers::ALT, Press));
-        assert!(!hit(f8, KeyModifiers::SHIFT, Press) && !hit(sp, none, Press));
-        // Release: key alone — a bare Space release (Ctrl lifted first) matches so
-        // hold-to-talk can still stop (Thread 3); non-chord keys don't.
-        assert!(hit(sp, none, Release) && hit(f8, none, Release));
-        assert!(!hit(KeyCode::Char('a'), none, Release));
-    }
-
-    // ── voice_chord_action ───────────────────────────────────────────────
-
-    #[test]
-    fn voice_chord_action_cases() {
-        use crate::app::actions::Action;
-        // (hold_mode, releases_reported, kind, listening, hold_owned) -> action
-        // tag, with the toggle-stop case being a past regression.
-        let press = KeyEventKind::Press;
-        let release = KeyEventKind::Release;
-        let tag = |a: Option<Action>| match a {
-            Some(Action::EnableVoiceMode) => "start",
-            Some(Action::VoiceStop) => "stop",
-            Some(Action::VoiceToggle) => "toggle",
-            None => "none",
-            _ => "other",
-        };
-        let cases = [
-            // hold + releases: press idle starts; release stops; press on a
-            // hold-owned session waits; press on a non-hold (/voice/toggle)
-            // session toggles off.
-            ((true, true, press, false, false), "start"),
-            ((true, true, release, true, true), "stop"),
-            ((true, true, press, true, true), "none"),
-            ((true, true, press, true, false), "toggle"),
-            // Non-hold (toggle mode or no reported releases): press toggles,
-            // release noops.
-            ((false, false, press, false, false), "toggle"),
-            ((false, false, release, true, false), "none"),
-            ((true, false, release, true, false), "none"),
-        ];
-        for ((hold, releases, kind, listening, owned), want) in cases {
-            assert_eq!(
-                tag(voice_chord_action(hold, releases, kind, listening, owned)),
-                want,
-                "voice_chord_action({hold},{releases},{kind:?},{listening},{owned})"
-            );
-        }
-    }
-
-    /// Hold-owned events are claimed even with the setting off (a dropped
-    /// release would wedge the mic open — past regression); otherwise presses
-    /// honor the setting and bare releases are never claimed.
-    #[test]
-    fn voice_chord_claims_event_cases() {
-        let press = KeyEventKind::Press;
-        let repeat = KeyEventKind::Repeat;
-        let release = KeyEventKind::Release;
-        // (kind, keybind_enabled, hold_owned) -> claimed
-        let cases = [
-            // Hold-owned: everything claimed, setting on or off.
-            ((release, false, true), true),
-            ((release, true, true), true),
-            ((press, false, true), true),
-            ((repeat, false, true), true),
-            // No hold: press/repeat follow the setting.
-            ((press, true, false), true),
-            ((press, false, false), false),
-            ((repeat, true, false), true),
-            ((repeat, false, false), false),
-            // No hold: a bare release is never ours (normal typing).
-            ((release, true, false), false),
-            ((release, false, false), false),
-        ];
-        for ((kind, enabled, owned), want) in cases {
-            assert_eq!(
-                voice_chord_claims_event(kind, enabled, owned),
-                want,
-                "voice_chord_claims_event({kind:?},{enabled},{owned})"
-            );
-        }
     }
 
     // ── plan_reconnect_load ──────────────────────────────────────────────
@@ -5267,7 +4855,7 @@ mod tests {
         assert_eq!(result[0].event, Event::Paste(r"C:\foo.png".to_string()));
     }
 
-    // ── make_run_result exit info ────────────────────────────────────────
+    // ── finish_run exit info ──────────────────────────────────────────────
 
     /// App focused on an agent (session `test-session`) with a seeded
     /// prompt → prompt → response exchange in its scrollback.
@@ -5286,9 +4874,9 @@ mod tests {
     }
 
     #[test]
-    fn make_run_result_fullscreen_quit_builds_summary() {
-        let app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
-        let info = make_run_result(&app).exit_info.expect("agent exit info");
+    fn finish_run_fullscreen_quit_builds_summary() {
+        let mut app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
+        let info = finish_run(&mut app).exit_info.expect("agent exit info");
         assert_eq!(info.session_id, "test-session");
         assert!(!info.minimal);
         let summary = info.summary.expect("summary on fullscreen quit");
@@ -5302,7 +4890,7 @@ mod tests {
     }
 
     #[test]
-    fn make_run_result_unanswered_prompt_omits_stale_response() {
+    fn finish_run_unanswered_prompt_omits_stale_response() {
         use crate::scrollback::block::RenderBlock;
         let mut app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
         let ActiveView::Agent(id) = app.active_view else {
@@ -5313,7 +4901,7 @@ mod tests {
             .unwrap()
             .scrollback
             .push_block(RenderBlock::user_prompt("now rerun the whole suite"));
-        let info = make_run_result(&app).exit_info.expect("agent exit info");
+        let info = finish_run(&mut app).exit_info.expect("agent exit info");
         let summary = info.summary.expect("prompt alone still summarizes");
         assert_eq!(
             summary.last_prompt.as_deref(),
@@ -5324,32 +4912,32 @@ mod tests {
     }
 
     #[test]
-    fn make_run_result_inline_and_minimal_quits_omit_summary() {
-        let app = seeded_quit_app(crate::app::ScreenMode::Inline);
-        let info = make_run_result(&app).exit_info.expect("agent exit info");
+    fn finish_run_inline_and_minimal_quits_omit_summary() {
+        let mut app = seeded_quit_app(crate::app::ScreenMode::Inline);
+        let info = finish_run(&mut app).exit_info.expect("agent exit info");
         assert!(info.summary.is_none());
         assert!(!info.minimal);
 
-        let app = seeded_quit_app(crate::app::ScreenMode::Minimal);
-        let info = make_run_result(&app).exit_info.expect("agent exit info");
+        let mut app = seeded_quit_app(crate::app::ScreenMode::Minimal);
+        let info = finish_run(&mut app).exit_info.expect("agent exit info");
         assert!(info.summary.is_none());
         assert!(info.minimal);
     }
 
     #[test]
-    fn make_run_result_empty_session_omits_summary() {
+    fn finish_run_empty_session_omits_summary() {
         let mut app = crate::app::app_view::tests::test_app_with_agent();
         app.screen_mode = crate::app::ScreenMode::Fullscreen;
-        let info = make_run_result(&app).exit_info.expect("agent exit info");
+        let info = finish_run(&mut app).exit_info.expect("agent exit info");
         assert!(info.summary.is_none());
     }
 
     #[test]
-    fn make_run_result_non_agent_views_have_no_exit_info() {
+    fn finish_run_non_agent_views_have_no_exit_info() {
         for view in [ActiveView::Welcome, ActiveView::AgentDashboard] {
             let mut app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
             app.active_view = view;
-            assert!(make_run_result(&app).exit_info.is_none());
+            assert!(finish_run(&mut app).exit_info.is_none());
         }
     }
 }

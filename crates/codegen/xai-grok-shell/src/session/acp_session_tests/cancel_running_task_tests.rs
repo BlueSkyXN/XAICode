@@ -211,7 +211,6 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 client_identifier: None,
                 origin_client: None,
                 feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-                upload_queue: Arc::new(OnceLock::new()),
                 sync_loop_cancel: None,
                 agent: std::cell::RefCell::new(test_agent_default().await),
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -260,8 +259,6 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     std::collections::VecDeque::new(),
                 ),
                 goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
-                managed_mcp_handle: Default::default(),
-                managed_mcp_expires_at: std::sync::Mutex::new(None),
                 initial_client_mcp_servers: vec![],
                 tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
                 mcp_announced_servers: Mutex::new(HashMap::new()),
@@ -294,7 +291,6 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 turn_summary_generation: std::cell::Cell::new(0),
                 turn_summary_enabled: false,
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
@@ -304,7 +300,6 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 ),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
-                trace_config_template: std::cell::RefCell::new(None),
             });
             let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
                 "hello persist".to_string(),
@@ -317,8 +312,6 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                         "persist-ack-test",
                         prompt_blocks,
                         PromptMode::Agent,
-                        None,
-                        None,
                         None,
                         None,
                         true,
@@ -688,7 +681,6 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 client_identifier: None,
                 origin_client: None,
                 feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-                upload_queue: Arc::new(OnceLock::new()),
                 sync_loop_cancel: None,
                 agent: std::cell::RefCell::new(test_agent_default().await),
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -737,8 +729,6 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     std::collections::VecDeque::new(),
                 ),
                 goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
-                managed_mcp_handle: Default::default(),
-                managed_mcp_expires_at: std::sync::Mutex::new(None),
                 initial_client_mcp_servers: vec![],
                 tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
                 mcp_announced_servers: Mutex::new(HashMap::new()),
@@ -771,7 +761,6 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 turn_summary_generation: std::cell::Cell::new(0),
                 turn_summary_enabled: false,
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
@@ -781,10 +770,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 ),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
-                trace_config_template: std::cell::RefCell::new(None),
             });
             let _ = actor
-                .process_conversation_turn_with_recovery("disabled-memory", None, None, None)
+                .process_conversation_turn_with_recovery("disabled-memory", None)
                 .await;
             let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
             persistence
@@ -980,7 +968,6 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 client_identifier: None,
                 origin_client: None,
                 feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-                upload_queue: Arc::new(OnceLock::new()),
                 sync_loop_cancel: None,
                 agent: std::cell::RefCell::new(agent),
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -1036,8 +1023,6 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     std::collections::VecDeque::new(),
                 ),
                 goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
-                managed_mcp_handle: Default::default(),
-                managed_mcp_expires_at: std::sync::Mutex::new(None),
                 initial_client_mcp_servers: vec![],
                 tool_metadata_snapshot: Arc::new(
                     std::sync::Mutex::new(Default::default()),
@@ -1078,9 +1063,6 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 session_turn_active: std::sync::Arc::new(
                     std::sync::atomic::AtomicBool::new(false),
                 ),
-                streaming_turn_capture: parking_lot::Mutex::new(
-                    StreamingTurnCapture::default(),
-                ),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
@@ -1090,7 +1072,6 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 ),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
-                trace_config_template: std::cell::RefCell::new(None),
             };
             let (tx, rx) = tokio::sync::oneshot::channel();
             let bridge = actor.agent.borrow().tool_bridge().clone();
@@ -1109,8 +1090,6 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                         prompt_id: "queued".into(),
                         prompt_blocks: vec![],
                         prompt_mode: PromptMode::Agent,
-                        trace_gcs_config: None,
-                        artifact_tracker: None,
                         client_identifier: None,
                         screen_mode: None,
                         verbatim: false,
@@ -1441,8 +1420,6 @@ async fn handle_prompt_injects_interrupt_reminder_before_user_message() {
                         PromptMode::Agent,
                         None,
                         None,
-                        None,
-                        None,
                         true,
                         None,
                         Some(ack_tx),
@@ -1503,8 +1480,6 @@ async fn handle_prompt_synthetic_origin_preserves_interrupt_reminder() {
                         PromptMode::Agent,
                         None,
                         None,
-                        None,
-                        None,
                         true,
                         None,
                         Some(ack_tx),
@@ -1540,8 +1515,6 @@ async fn cancel_running_task_interactive_preserves_queued_work() {
             prompt_id: prompt_id.to_string(),
             prompt_blocks: vec![],
             prompt_mode: PromptMode::Agent,
-            trace_gcs_config: None,
-            artifact_tracker: None,
             client_identifier: None,
             screen_mode: None,
             verbatim: false,
@@ -2096,8 +2069,6 @@ async fn cancel_resolves_front_when_running_task_is_none() {
             prompt_id: prompt_id.to_string(),
             prompt_blocks: vec![],
             prompt_mode: PromptMode::Agent,
-            trace_gcs_config: None,
-            artifact_tracker: None,
             client_identifier: None,
             screen_mode: None,
             verbatim: false,
@@ -2415,7 +2386,6 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 client_identifier: None,
                 origin_client: None,
                 feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-                upload_queue: Arc::new(OnceLock::new()),
                 sync_loop_cancel: None,
                 agent: std::cell::RefCell::new(agent),
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -2471,8 +2441,6 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     std::collections::VecDeque::new(),
                 ),
                 goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
-                managed_mcp_handle: Default::default(),
-                managed_mcp_expires_at: std::sync::Mutex::new(None),
                 initial_client_mcp_servers: vec![],
                 tool_metadata_snapshot: Arc::new(
                     std::sync::Mutex::new(Default::default()),
@@ -2513,9 +2481,6 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 session_turn_active: std::sync::Arc::new(
                     std::sync::atomic::AtomicBool::new(false),
                 ),
-                streaming_turn_capture: parking_lot::Mutex::new(
-                    StreamingTurnCapture::default(),
-                ),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 sampler_handle: sampler_handle.clone(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
@@ -2525,7 +2490,6 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 ),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
-                trace_config_template: std::cell::RefCell::new(None),
             };
             let request_id = xai_grok_sampler::RequestId::random();
             let request_id_for_task = request_id.clone();
@@ -2667,8 +2631,6 @@ async fn cancel_keeps_remaining_queued_prompts_visible_to_clients() {
             prompt_id: prompt_id.to_string(),
             prompt_blocks: vec![],
             prompt_mode: PromptMode::Agent,
-            trace_gcs_config: None,
-            artifact_tracker: None,
             client_identifier: None,
             screen_mode: None,
             verbatim: false,

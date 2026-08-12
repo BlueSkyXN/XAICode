@@ -67,10 +67,7 @@ async fn finish_session_exit_feedback(session: &SessionActor) {
     if let Some(cancel) = &session.sync_loop_cancel {
         cancel.cancel();
     }
-    session
-        .feedback_manager
-        .shutdown(session.upload_queue.get())
-        .await;
+    session.feedback_manager.shutdown().await;
     if !session.startup_hints.is_subagent {
         session.persist_background_task_manifest().await;
     }
@@ -594,7 +591,7 @@ pub(super) async fn run_session(
                         SessionCommand::SetToolOverrides { overrides } => {
                             session.set_tool_overrides(overrides);
                         }
-                        SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, artifact_upload_ctx, client_identifier, screen_mode, verbatim, traceparent, json_schema, send_now, admission, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx } => {
+                        SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, client_identifier, screen_mode, verbatim, traceparent, json_schema, send_now, admission, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx } => {
                             let origin = super::PromptOrigin::from_prompt_id(&prompt_id);
                             let (actor_admitted, task_wake_fallback) = match admission {
                                 Some(admission) => {
@@ -661,17 +658,11 @@ pub(super) async fn run_session(
                                 let meta = serde_json::json!({ "traceparent": tp });
                                 xai_file_utils::trace_context::link_current_span_to_meta(&meta);
                             }
-                            let (trace_gcs_config, artifact_tracker) = match artifact_upload_ctx {
-                                Some(tu) => (Some(tu.gcs_config), Some(tu.artifact_tracker)),
-                                None => (None, None),
-                            };
                             let cancel_for_send_now = session
                                 .queue_input(QueueInputRequest {
                                     prompt_blocks,
                                     prompt_id,
                                     prompt_mode,
-                                    trace_gcs_config,
-                                    artifact_tracker,
                                     client_identifier,
                                     screen_mode,
                                     verbatim,
@@ -979,8 +970,8 @@ pub(super) async fn run_session(
                             // pending at cancel time are committed to
                             // updates.jsonl. Without this, the tail of a long
                             // reasoning stream sitting in the buffer when the
-                            // user hits Ctrl+C never reaches disk before the
-                            // trace upload snapshots the session directory.
+                            // user hits Ctrl+C never reaches the persisted
+                            // session snapshot.
                             // Mirrors the pattern in `FlushComplete` below.
                             if let Some(notification) = replay_buffer.flush() {
                                 session.emit_buffered(notification).await;
@@ -1476,83 +1467,7 @@ pub(super) async fn run_session(
                                 let _ = respond_to.send(Ok(()));
                             });
                         }
-                        SessionCommand::ToggleMcpTool { server_name, tool_name, enabled, is_managed_gateway, respond_to } => {
-                            if is_managed_gateway {
-                                let mut disabled_tools = crate::util::config::get_all_mcp_disabled_tools(std::path::Path::new(&session.session_info.cwd));
-                                if tool_name.is_empty() {
-                                    let set = disabled_tools
-                                        .entry(crate::util::config::MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY.to_string())
-                                        .or_default();
-                                    if enabled {
-                                        set.remove(&server_name);
-                                    } else {
-                                        set.insert(server_name.clone());
-                                    }
-                                    if set.is_empty() {
-                                        disabled_tools.remove(crate::util::config::MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY);
-                                    }
-                                } else if enabled {
-                                    if let Some(set) = disabled_tools.get_mut(&server_name) {
-                                        set.remove(&tool_name);
-                                        if set.is_empty() {
-                                            disabled_tools.remove(&server_name);
-                                        }
-                                    }
-                                } else {
-                                    disabled_tools
-                                        .entry(server_name.clone())
-                                        .or_default()
-                                        .insert(tool_name.clone());
-                                }
-
-                                session
-                                    .refresh_mcp_snapshot_and_schedule_reminder_with_disabled(
-                                        &disabled_tools,
-                                    )
-                                    .await;
-                                session.refresh_goal_harness_enabled().await;
-
-                                let disabled_vec: Vec<String> = if tool_name.is_empty() {
-                                    disabled_tools
-                                        .get(crate::util::config::MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY)
-                                        .map(|s| s.iter().cloned().collect())
-                                        .unwrap_or_default()
-                                } else {
-                                    disabled_tools
-                                        .get(&server_name)
-                                        .map(|s| s.iter().cloned().collect())
-                                        .unwrap_or_default()
-                                };
-                                let notifications = session.notifications.gateway.clone();
-                                let session_id = session.session_info.id.0.clone();
-                                let server_for_persist = if tool_name.is_empty() {
-                                    crate::util::config::MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY.to_string()
-                                } else {
-                                    server_name.clone()
-                                };
-                                tokio::task::spawn_local(async move {
-                                    if let Err(e) = crate::util::config::save_mcp_disabled_tools(
-                                        &server_for_persist,
-                                        &disabled_vec,
-                                    ).await {
-                                        tracing::warn!(
-                                            server = server_for_persist.as_str(),
-                                            error = %e,
-                                            "Failed to persist disabled_tools to config"
-                                        );
-                                    }
-                                    let payload = crate::extensions::mcp::McpToolsChanged {
-                                        session_id: session_id.to_string(),
-                                        server_name: String::new(),
-                                        tools: Vec::new(),
-                                    };
-                                    if let Ok(params) = serde_json::value::to_raw_value(&payload) {
-                                        notifications.forward_fire_and_forget(acp::ExtNotification::new("x.ai/mcp/tools_changed", params.into()));
-                                    }
-                                    let _ = respond_to.send(Ok(()));
-                                });
-                                continue;
-                            }
+                        SessionCommand::ToggleMcpTool { server_name, tool_name, enabled, respond_to } => {
                             let qualified = format!(
                                 "{}{}{}",
                                 server_name,
@@ -1750,12 +1665,6 @@ pub(super) async fn run_session(
                                 let result = s.handle_mcp_auth_trigger(&server_name).await;
                                 let _ = respond_to.send(result);
                             });
-                        }
-                        SessionCommand::GetManagedGatewayDisabledTools { respond_to } => {
-                            let disabled_tools = crate::util::config::get_all_mcp_disabled_tools(
-                                std::path::Path::new(&session.session_info.cwd),
-                            );
-                            let _ = respond_to.send(disabled_tools);
                         }
                         SessionCommand::RetryAuthRequiredServers { respond_to } => {
                             let s = session.clone();
@@ -1984,8 +1893,6 @@ pub(super) async fn run_session(
                                     prompt_id,
                                     prompt_blocks,
                                     prompt_mode: crate::session::plan_mode::PromptMode::Agent,
-                                    trace_gcs_config: None,
-                                    artifact_tracker: None,
                                     client_identifier: None,
                                     screen_mode: None,
                                     verbatim: true,
@@ -2035,8 +1942,6 @@ pub(super) async fn run_session(
                                     prompt_id,
                                     prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(prompt_text))],
                                     prompt_mode: crate::session::plan_mode::PromptMode::Agent,
-                                    trace_gcs_config: None,
-                                    artifact_tracker: None,
                                     client_identifier: None,
                                     screen_mode: None,
                                     verbatim: true,
@@ -2061,46 +1966,6 @@ pub(super) async fn run_session(
                         }
                         SessionCommand::TakeHarnessTraceTurns { respond_to } => {
                             let result = session.chat_state_handle.take_harness_trace_turns().await;
-                            let _ = respond_to.send(result);
-                        }
-                        SessionCommand::TakeStreamingCapture { prompt_id, respond_to } => {
-                            // Out-of-band: never touches `chat_state`. The
-                            // live slot is the only source of truth — there
-                            // is no stash, so a queued prompt's
-                            // `StreamStarted` racing this take will reset
-                            // the slot to the new prompt-id and we'll log a
-                            // tripwire before returning `None`.
-                            let taken = {
-                                let mut cap = session.streaming_turn_capture.lock();
-                                if cap.prompt_id.as_deref() == Some(prompt_id.as_str()) {
-                                    Some(std::mem::take(&mut *cap))
-                                } else {
-                                    // Race: live slot now belongs to a
-                                    // different turn. Drop this take rather
-                                    // than misattribute the partial. The
-                                    // warn! is a production tripwire — if
-                                    // we ever see it fire in real traffic
-                                    // we should add a per-prompt stash.
-                                    if !cap.is_empty() {
-                                        tracing::warn!(
-                                            requested_prompt_id = %prompt_id,
-                                            slot_prompt_id = ?cap.prompt_id,
-                                            "streaming_capture race: live slot belongs to a different prompt; \
-                                             dropping streaming_partial.json for the requested turn",
-                                        );
-                                    }
-                                    None
-                                }
-                            };
-                            // Consolidate outside the lock — `finalize_for_upload`
-                            // builds an up-to-8MB joined string, so it must not run
-                            // while sampler events for a racing same-session turn
-                            // contend for the mutex. Keep only uncommitted
-                            // generations; empty afterwards ⇒ nothing to upload.
-                            let result = taken.and_then(|mut cap| {
-                                cap.finalize_for_upload();
-                                (!cap.is_empty()).then_some(cap)
-                            });
                             let _ = respond_to.send(result);
                         }
                         SessionCommand::PersistGitHead { commit, branch } => {

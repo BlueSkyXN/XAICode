@@ -1,13 +1,11 @@
 //! Provider construction for the external stream: `SdkLoggerProvider` +
-//! `SdkMeterProvider`, never registered globally, never sharing anything with
-//! the internal `RefreshableSpanExporter` pipeline.
+//! `SdkMeterProvider`, never registered globally and isolated from local
+//! diagnostics.
 //!
 //! The exporters are plain `opentelemetry_otlp` http/protobuf or gRPC/protobuf
 //! exporters built with **only** the customer headers from
-//! `OTEL_EXPORTER_OTLP_HEADERS` — no code path here can attach
-//! `Authorization`/`X-XAI-Token-Auth`/`x-userid`;
-//! those constants live in `otel_layer` and are not referenced by this
-//! module. No `AuthCredentialProvider` is ever read.
+//! `OTEL_EXPORTER_OTLP_HEADERS` — no code path here can attach internal
+//! headers or account credentials.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -131,13 +129,13 @@ use super::redact::{ExportHealth, RedactingLogExporter, SharedGates, ValidatingM
 
 /// Resource shared by both providers. `builder_empty()` (not `builder()`):
 /// the default `EnvResourceDetector` would export `OTEL_RESOURCE_ATTRIBUTES`
-/// env values, bypassing the schema (same rationale as the internal layer).
+/// env values, bypassing the schema.
 fn build_resource(cfg: &ExternalOtelConfig) -> opentelemetry_sdk::Resource {
     let mut attrs = vec![
         opentelemetry::KeyValue::new("service.version", cfg.client.service_version.clone()),
         opentelemetry::KeyValue::new("client.version", cfg.client.client_version.clone()),
         opentelemetry::KeyValue::new("app.entrypoint", cfg.client.app_entrypoint.clone()),
-        opentelemetry::KeyValue::new("grok_code.schema.version", super::schema::SCHEMA_VERSION),
+        opentelemetry::KeyValue::new("ai.xaicode.schema.version", super::schema::SCHEMA_VERSION),
     ];
     // terminal.type: emulator brand (TERM_PROGRAM) or terminfo type (TERM).
     if let Some(terminal_type) = std::env::var("TERM_PROGRAM")
@@ -148,8 +146,7 @@ fn build_resource(cfg: &ExternalOtelConfig) -> opentelemetry_sdk::Resource {
         attrs.push(opentelemetry::KeyValue::new("terminal.type", terminal_type));
     }
     opentelemetry_sdk::Resource::builder_empty()
-        // RQ6 (final): `grok-cli`, a wire commitment.
-        .with_service_name("grok-cli")
+        .with_service_name("xaicode")
         .with_attributes(attrs)
         .build()
 }
@@ -693,7 +690,7 @@ mod tests {
     fn cfg_with_headers(headers: Vec<(String, String)>) -> ExternalOtelConfig {
         let mut cfg = ExternalOtelConfig::resolve_with(
             |name| match name {
-                "GROK_EXTERNAL_OTEL" => Some("1".into()),
+                "XAICODE_EXTERNAL_OTEL" => Some("1".into()),
                 "OTEL_LOGS_EXPORTER" => Some("otlp".into()),
                 _ => None,
             },
@@ -705,11 +702,9 @@ mod tests {
         cfg
     }
 
-    /// Header-isolation invariant (T2): the outgoing header map equals
-    /// exactly the parsed `OTEL_EXPORTER_OTLP_HEADERS` — no `Authorization`,
-    /// `X-XAI-Token-Auth`, `x-userid`, or `x-teamid` unless customer-supplied
-    /// (complement of the internal pipeline's
-    /// `extra_headers_override_bearer_but_keep_static_identity`).
+    /// Header-isolation invariant: the outgoing header map equals exactly the
+    /// parsed customer OTLP headers — no internal auth or account identity is
+    /// attached implicitly.
     #[test]
     fn exporter_headers_are_exactly_customer_headers() {
         let cfg = cfg_with_headers(vec![("x-collector-token".into(), "abc".into())]);
@@ -717,7 +712,12 @@ mod tests {
         let expected: HashMap<String, String> =
             [("x-collector-token".to_string(), "abc".to_string())].into();
         assert_eq!(headers, expected);
-        for forbidden in ["Authorization", "X-XAI-Token-Auth", "x-userid", "x-teamid"] {
+        for forbidden in [
+            "Authorization",
+            "x-internal-auth",
+            "x-account-id",
+            "x-tenant-id",
+        ] {
             assert!(
                 !headers.contains_key(forbidden),
                 "{forbidden} must never be auto-attached to external exports"
@@ -746,7 +746,7 @@ mod tests {
     fn grpc_exporters_build_for_https_endpoints() {
         let cfg = ExternalOtelConfig::resolve_with(
             |name| match name {
-                "GROK_EXTERNAL_OTEL" => Some("1".into()),
+                "XAICODE_EXTERNAL_OTEL" => Some("1".into()),
                 "OTEL_LOGS_EXPORTER" | "OTEL_METRICS_EXPORTER" => Some("otlp".into()),
                 "OTEL_EXPORTER_OTLP_PROTOCOL" => Some("grpc".into()),
                 // Nothing listens here: gRPC channels connect lazily, so
@@ -813,7 +813,7 @@ mod tests {
     fn inactive_signal_ca_does_not_disable_http_stream() {
         let cfg = ExternalOtelConfig::resolve_with(
             |name| match name {
-                "GROK_EXTERNAL_OTEL" => Some("1".into()),
+                "XAICODE_EXTERNAL_OTEL" => Some("1".into()),
                 // Only metrics export; logs are off but carry a broken CA.
                 "OTEL_METRICS_EXPORTER" => Some("otlp".into()),
                 "OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE" => {
@@ -904,7 +904,7 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("abc")
         );
-        for forbidden in ["x-xai-token-auth", "x-userid", "x-teamid"] {
+        for forbidden in ["x-internal-auth", "x-account-id", "x-tenant-id"] {
             assert!(metadata.get(forbidden).is_none());
         }
     }

@@ -3,7 +3,6 @@ use super::foreign::{dispatch_fetch_session_list, invalidate_foreign_picker};
 use super::fork::build_child_fork_marker;
 use super::lifecycle::{
     clear_startup_actions, dispatch_new_session_inner, dispatch_new_worktree_session,
-    refuse_chat_mode_build_agent,
 };
 use crate::acp::tracker::AcpUpdateTracker;
 use crate::app::actions::{Action, Effect};
@@ -16,7 +15,7 @@ use crate::app::dispatch::ctx::{
     SwitchCause, get_active_agent, get_active_agent_mut, switch_to_agent, with_active_agent,
 };
 use crate::app::dispatch::modes::inherit_auto_mode;
-use crate::app::dispatch::prompt::{defer_to_open_reload_window, supersede_open_reload_window};
+use crate::app::dispatch::prompt::defer_to_open_reload_window;
 use crate::app::dispatch::queue::{maybe_drain_queue, note_peek_page_flip};
 use crate::app::dispatch::router::dispatch;
 use crate::app::dispatch::status::notify_session_ready;
@@ -171,7 +170,10 @@ fn dispatch_load_session_ungated(
             state: AgentState::Idle,
             tracker: AcpUpdateTracker::new(),
             cwd: session_cwd.clone().unwrap_or_else(|| app.cwd.clone()),
-            is_worktree: false,
+            is_worktree: crate::app::session_startup::parent_session_is_worktree(
+                &session_id,
+                session_cwd.as_deref().unwrap_or(app.cwd.as_path()),
+            ),
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
@@ -215,7 +217,6 @@ fn dispatch_load_session_ungated(
         .prompt
         .set_contextual_hints(app.contextual_hints.undo, app.contextual_hints.plan_mode);
     agent_mut.set_session_recap_available(app.session_recap_available);
-    agent_mut.set_voice_mode_available(app.voice_mode_enabled);
     agent_mut.scrollback.begin_batch();
     if matches!(app.restore_code, Some(true)) {
         agent_mut.session.start_command(AgentCommand::RestoreCode);
@@ -317,7 +318,7 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
     if picker_dismissed {
         invalidate_picker_fetch_on_dismiss(app);
     }
-    let (session_id, source, cwd) = match entry_data {
+    let (session_id, source, _cwd) = match entry_data {
         Some(d) => d,
         None => {
             let sessions = match app.session_picker_entries.take() {
@@ -399,24 +400,12 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
             false,
         );
     }
-    if source == "remote" || source == "both" {
-        if focus_if_session_already_open(app, &session_id, false).is_some() {
-            #[cfg(feature = "local-workspace")]
-            {
-                app.welcome_history_load_as_build = false;
-            }
-            return vec![];
-        }
-        app.show_toast("Restoring session from remote...");
-        dispatch_load_session_with_restore(app, session_id, cwd)
-    } else {
-        #[cfg(feature = "local-workspace")]
-        {
-            app.welcome_history_load_as_build = false;
-        }
-        app.show_toast("Session not found locally");
-        vec![]
+    #[cfg(feature = "local-workspace")]
+    {
+        app.welcome_history_load_as_build = false;
     }
+    app.show_toast("Session not found locally");
+    vec![]
 }
 /// Pick a session from the picker and resume it in a new git worktree.
 pub(in crate::app::dispatch) fn dispatch_pick_session_in_worktree(
@@ -854,7 +843,6 @@ pub(in crate::app::dispatch) fn session_picker_entry_matches(
 pub(in crate::app::dispatch) fn dispatch_pick_content_session(
     app: &mut AppView,
     session_id: String,
-    cwd: String,
 ) -> Vec<Effect> {
     if session_picker_external_filter_active(app) {
         return vec![];
@@ -885,145 +873,12 @@ pub(in crate::app::dispatch) fn dispatch_pick_content_session(
     if focus_if_session_already_open(app, &session_id, false).is_some() {
         return vec![];
     }
-    app.show_toast("Restoring session from remote...");
-    dispatch_load_session_with_restore(app, session_id, cwd)
-}
-/// Create a placeholder agent and restore a remote session before loading.
-/// Build rows only — conversation rows never reach the restore path.
-pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
-    app: &mut AppView,
-    session_id: String,
-    session_cwd: String,
-) -> Vec<Effect> {
     #[cfg(feature = "local-workspace")]
-    let bypass_chat_refusal = app.welcome_history_load_as_build;
-    #[cfg(not(feature = "local-workspace"))]
-    let bypass_chat_refusal = false;
-    if !bypass_chat_refusal
-        && crate::app::session_startup::chat_mode_refuses_local_build_load(
-            app.chat_mode,
-            false,
-            &session_id,
-            &app.cwd,
-        )
     {
-        #[cfg(feature = "local-workspace")]
-        {
-            app.welcome_history_load_as_build = false;
-        }
-        app.show_toast(crate::app::session_startup::CHAT_MODE_LOCAL_BUILD_REFUSAL);
-        return vec![];
+        app.welcome_history_load_as_build = false;
     }
-    if focus_if_session_already_open(app, &session_id, false).is_some() {
-        #[cfg(feature = "local-workspace")]
-        {
-            app.welcome_history_load_as_build = false;
-        }
-        return vec![];
-    }
-    let agent_id = AgentId(app.next_agent_id);
-    app.next_agent_id += 1;
-    let mut scrollback = ScrollbackState::new();
-    scrollback.set_appearance(app.appearance.clone());
-    scrollback.push_block(RenderBlock::system(format!(
-        "Restoring session {session_id} from remote..."
-    )));
-    let agent = AgentView::new(
-        AgentSession {
-            id: agent_id,
-            acp_tx: app.acp_tx.clone(),
-            session_id: None,
-            models: app.models.clone(),
-            state: AgentState::Idle,
-            tracker: AcpUpdateTracker::new(),
-            cwd: app.cwd.clone(),
-            is_worktree: false,
-            forked_from: None,
-            pending_prompts: std::collections::VecDeque::new(),
-            next_queue_id: 0,
-            yolo_mode: app.default_yolo,
-            auto_mode: inherit_auto_mode(app),
-            prompt_history: Vec::new(),
-            prompt_history_loading: true,
-            loading_replay: true,
-            restore_degree: None,
-            rate_limited: false,
-            model_incompatible: false,
-            credit_limit_blocked: false,
-            free_usage_blocked: false,
-            available_commands: app.bootstrap_acp_commands.clone(),
-            available_commands_generation: 1,
-            available_tools: None,
-            model_switch_pending: false,
-            user_model_preference: None,
-            deferred_model_switch: app.deferred_model_switch_from_cli(),
-            bg_tasks: std::collections::BTreeMap::new(),
-            bg_tool_call_to_task: std::collections::HashMap::new(),
-            scheduled_tasks: std::collections::HashMap::new(),
-            in_flight_prompt: None,
-            compact_held_prompt: None,
-            current_prompt_id: None,
-            created_via_new: false,
-        },
-        scrollback,
-    );
-    app.agents.insert(agent_id, agent);
-    {
-        let agent = app.agents.get_mut(&agent_id).unwrap();
-        agent.attached_as_viewer = true;
-        agent.begin_replay_window();
-        agent.prompt.set_compact(app.appearance.prompt.compact);
-        agent.prompt.adopt_slash_mru(app.slash_mru.clone());
-        agent.prompt.adopt_command_tags(app.command_tags.clone());
-        agent
-            .prompt
-            .set_contextual_hints(app.contextual_hints.undo, app.contextual_hints.plan_mode);
-        agent.set_session_recap_available(app.session_recap_available);
-        agent.set_voice_mode_available(app.voice_mode_enabled);
-        agent.apply_app_scoped_gates(
-            app.sharing_enabled,
-            app.usage_visible,
-            !app.has_external_auth_provider,
-            app.chat_mode,
-            app.screen_mode,
-            &app.active_announcements,
-            &app.tier_restricted_commands,
-        );
-        agent.chat_kind = app.chat_mode;
-        #[cfg(feature = "local-workspace")]
-        {
-            let history_build = app.welcome_history_load_as_build;
-            let local_intent = match &app.welcome_session_local_workspace {
-                Some(Some(_)) => true,
-                Some(None) => false,
-                None => crate::app::session_startup::active_local_workspace()
-                    .ok()
-                    .flatten()
-                    .is_some(),
-            };
-            let (mode, cli_locked) =
-                crate::views::welcome::workspace_mode::indicator_for_opening_session(
-                    false,
-                    history_build,
-                    app.local_workspace_startup_locked,
-                    local_intent,
-                );
-            agent.workspace_mode = mode;
-            agent.workspace_mode_cli_locked = cli_locked;
-        }
-        agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
-        agent
-            .prompt
-            .slash_controller
-            .registry_mut()
-            .set_plugins_visible(!app.appearance.disable_plugins);
-    }
-    switch_to_agent(app, agent_id, SwitchCause::Load);
-    vec![Effect::RestoreAndLoadSession {
-        agent_id,
-        session_id,
-        session_cwd,
-    }]
+    app.show_toast("Session not found locally");
+    vec![]
 }
 #[allow(clippy::too_many_arguments)]
 pub(in crate::app::dispatch) fn handle_session_loaded(
@@ -1051,6 +906,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         agent.scheduler_background_loops = scheduler_background_loops;
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;
+        agent.arm_late_replay_grace();
         agent.session.restore_degree = restore_degree;
         agent.session.finish_turn(&mut agent.scrollback);
         agent.mark_turn_finished();
@@ -1136,11 +992,6 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
                 session_id: hydrate_sid.clone(),
             });
         }
-        effects.push(Effect::FetchBilling {
-            agent_id,
-            silent: true,
-            nonce: 0,
-        });
         if let Some(switch) = deferred {
             agent.session.model_switch_pending = true;
             effects.push(Effect::SwitchModel {
@@ -1272,96 +1123,6 @@ pub(in crate::app::dispatch) fn handle_card_detail_loaded(
         })
     {
         entry.card_detail = Some(detail);
-    }
-    vec![]
-}
-pub(in crate::app::dispatch) fn handle_session_restored(
-    app: &mut AppView,
-    agent_id: AgentId,
-    local_session_id: String,
-) -> Vec<Effect> {
-    #[cfg(feature = "local-workspace")]
-    let bypass_chat_refusal = app.welcome_history_load_as_build;
-    #[cfg(not(feature = "local-workspace"))]
-    let bypass_chat_refusal = false;
-    if !bypass_chat_refusal
-        && crate::app::session_startup::chat_mode_refuses_local_build_load(
-            app.chat_mode,
-            false,
-            &local_session_id,
-            &app.cwd,
-        )
-    {
-        #[cfg(feature = "local-workspace")]
-        {
-            app.welcome_history_load_as_build = false;
-        }
-        refuse_chat_mode_build_agent(app, agent_id);
-        return vec![];
-    }
-    let sid = clear_stale_session_id(app, &local_session_id);
-    if let Some(agent) = app.agents.get_mut(&agent_id) {
-        supersede_open_reload_window(agent, agent_id, "SessionRestored");
-        agent.bind_session_id(sid);
-        agent.chat_kind = app.chat_mode;
-        #[cfg(feature = "local-workspace")]
-        {
-            let history_build = app.welcome_history_load_as_build;
-            let local_intent = match &app.welcome_session_local_workspace {
-                Some(Some(_)) => true,
-                Some(None) => false,
-                None => crate::app::session_startup::active_local_workspace()
-                    .ok()
-                    .flatten()
-                    .is_some(),
-            };
-            let (mode, cli_locked) =
-                crate::views::welcome::workspace_mode::indicator_for_opening_session(
-                    false,
-                    history_build,
-                    app.local_workspace_startup_locked,
-                    local_intent,
-                );
-            agent.workspace_mode = mode;
-            agent.workspace_mode_cli_locked = cli_locked;
-        }
-        agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
-        agent.scrollback.push_block(RenderBlock::system(format!(
-            "Session restored. Loading {local_session_id}..."
-        )));
-    }
-    let cwd = app.cwd.clone();
-    vec![Effect::LoadSession {
-        agent_id,
-        session_id: local_session_id,
-        session_cwd: Some(cwd),
-        // Never a conversation entry (effects OR SessionFlags.chat_mode).
-        chat_kind: false,
-    }]
-}
-pub(in crate::app::dispatch) fn handle_session_restore_failed(
-    app: &mut AppView,
-    agent_id: AgentId,
-    error: String,
-) -> Vec<Effect> {
-    tracing::error!(agent = ?agent_id, error = %error, "Session restore failed");
-    #[cfg(feature = "local-workspace")]
-    {
-        app.welcome_history_load_as_build = false;
-    }
-    if let Some(agent) = app.agents.get_mut(&agent_id) {
-        if defer_to_open_reload_window(agent, agent_id, "SessionRestoreFailed") {
-            return vec![];
-        }
-        agent.pending_extensions_fetch = false;
-        agent.session.loading_replay = false;
-        agent.session.prompt_history_loading = false;
-        agent
-            .scrollback
-            .push_block(RenderBlock::session_event(SessionEvent::TurnFailed {
-                error: format!("Couldn't restore session: {error}"),
-                elapsed: None,
-            }));
     }
     vec![]
 }

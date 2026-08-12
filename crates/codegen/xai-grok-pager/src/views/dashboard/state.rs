@@ -682,11 +682,9 @@ pub struct DashboardState {
     /// `render_header` and consumed by the mouse handler to open the
     /// location picker. `None` when the header is too narrow to paint it.
     pub location_hit: crate::app::agent_view::HitArea,
-    /// Hit area for the header's promo upgrade CTA `[label]` button (click →
-    /// `AnnouncementsOpenCta(Dashboard)`). `None` when no CTA is shown.
+    /// Retained hit-area slot for dashboard header compatibility.
     pub upgrade_cta_hit: crate::app::agent_view::HitArea,
-    /// A pinned (non-dismissible) promo CTA is live this frame (cached by
-    /// `render_dashboard`); `Ctrl+O` opens it instead of falling through.
+    /// Retained dashboard state slot for compatibility with persisted layouts.
     pub pinned_upgrade_cta_live: bool,
     /// When `true`, agents dispatched from the dashboard are created in a
     /// fresh git worktree (rooted at the current cwd) instead of in the cwd
@@ -721,12 +719,6 @@ pub struct DashboardState {
     /// when the dialog opens; consumed on confirm. Mirrors the `attach` flag of
     /// the non-worktree dispatch path.
     pub pending_worktree_attach: bool,
-    /// Mirror of `AppView::voice_listening`, synced each frame so the dispatch
-    /// box can show a record badge + stream the interim transcript while voice
-    /// dictation targets the dashboard's new-agent input.
-    pub voice_listening: bool,
-    /// Mirror of `AppView::voice_interim` — the live partial transcript.
-    pub voice_interim: Option<String>,
     /// Surface-local compose mode for dispatch + peek (not persisted; not
     /// shared with agent sessions). `/multiline` or Ctrl+M.
     pub multiline_mode: bool,
@@ -1410,8 +1402,6 @@ impl DashboardState {
             worktree_dialog: None,
             pending_worktree_prompt: None,
             pending_worktree_attach: false,
-            voice_listening: false,
-            voice_interim: None,
             multiline_mode: false,
             // Fresh dashboard with no rows seeded → the `[+ New
             // Agent]` button is the default cursor target. Open
@@ -1452,11 +1442,6 @@ impl DashboardState {
     pub(crate) fn set_recap_visible(&mut self, visible: bool) {
         self.dispatch.set_recap_visible(visible);
         self.peek_reply.set_recap_visible(visible);
-    }
-
-    pub(crate) fn set_voice_visible(&mut self, visible: bool) {
-        self.dispatch.set_voice_visible(visible);
-        self.peek_reply.set_voice_visible(visible);
     }
 
     /// Gate `/auto` on both dashboard prompt registries (dispatch + peek
@@ -3171,11 +3156,6 @@ impl DashboardState {
         // resolves here. The dispatch re-resolves the slot gate, so a stale flag
         // stays a safe no-op. Stamped `Keyboard` (like the agent/welcome Ctrl+O)
         // so "which surface" stays orthogonal to "was it keyboard".
-        if self.pinned_upgrade_cta_live && key!('o', CONTROL).matches(key) {
-            return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                xai_grok_telemetry::events::AnnouncementCtaSurface::Keyboard,
-            ));
-        }
 
         // Shift+Tab while the peek is open cycles the PEEKED agent's live
         // mode, not the new-session staged mode. The registry resolves all
@@ -3998,11 +3978,6 @@ impl DashboardState {
 
             // Click on the header upgrade CTA `[label]` → open the promo url
             // (resolved through the slot gate at dispatch time).
-            if self.upgrade_cta_hit.contains(mouse.column, mouse.row) {
-                return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                    xai_grok_telemetry::events::AnnouncementCtaSurface::Dashboard,
-                ));
-            }
 
             // Click on the header location label → open the location
             // picker. Sits next to the `[+ New Agent]` check since both
@@ -4631,8 +4606,6 @@ fn dashboard_action_for_id(
         | ActionId::ShortcutsHelp
         | ActionId::OpenSettings
         | ActionId::OpenDashboard
-        | ActionId::EnableVoiceMode
-        | ActionId::VoiceToggle
         // Overlay actions are intercepted at the AppView level
         // before they reach the dashboard's own input loop; they
         // can never arrive here.
@@ -7111,9 +7084,7 @@ mod tests {
         let rect = Rect::new(2, 1, 60, 1);
         state.dispatch_rect = Some(rect);
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
-        let _ = state
-            .dispatch
-            .draw(&mut buf, rect, None, &style, None, None);
+        let _ = state.dispatch.draw(&mut buf, rect, None, &style, None);
         for (kind, column) in [
             (MouseEventKind::Down(MouseButton::Left), 4),
             (MouseEventKind::Drag(MouseButton::Left), 12),

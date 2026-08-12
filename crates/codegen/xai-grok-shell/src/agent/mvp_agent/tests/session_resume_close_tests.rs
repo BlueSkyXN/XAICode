@@ -476,7 +476,7 @@ fn release_keeps_a_running_thread_without_a_live_bit() {
             })),
         );
         agent.set_session_live_state(&sid, SessionLiveState::Working);
-        agent.set_turn_number(&sid, 1);
+        agent.session_registry.set_turn_number(&sid, 1);
         agent.session_registry.release(&sid);
         assert!(
             agent.session_registry.has_thread(&sid),

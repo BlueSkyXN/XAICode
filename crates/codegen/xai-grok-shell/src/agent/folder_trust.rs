@@ -48,7 +48,7 @@ use xai_grok_workspace::folder_trust::{
     prompt_for_trust,
 };
 
-use crate::session::managed_mcp::mcp_server_name;
+use crate::session::mcp_sources::mcp_server_name;
 use crate::util::config::{MCP_SCOPE_PROJECT, RemoteSettings};
 
 // NOTE: this folder-trust store (`~/.grok/trusted_folders.toml`) is SEPARATE
@@ -211,7 +211,7 @@ fn record(workspace_key: &Path, allowed: bool) {
 /// Tests use UNIQUE temp-dir keys and never globally clear `DECISIONS`, so they
 /// can run in parallel without clobbering each other's recorded decisions.
 ///
-/// Consumed by the MCP project-scope gate tests here and in `managed_mcp`.
+/// Consumed by the MCP project-scope gate tests here and in `mcp_sources`.
 #[cfg(test)]
 pub(crate) fn record_for_test(cwd: &Path, allowed: bool) {
     record(&workspace_key(cwd), allowed);

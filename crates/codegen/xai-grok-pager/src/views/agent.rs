@@ -118,9 +118,6 @@ pub struct AgentViewLayout {
     pub plugin_cta: Rect,
     /// Follow-up suggestion chips row (below the plugin CTA, above the prompt).
     pub follow_ups: Rect,
-    /// Single-row record indicator ("◉ Recording") directly above the prompt,
-    /// shown only while voice capture is active.
-    pub voice_recording: Rect,
     pub prompt: Rect,
     pub shortcuts: Rect,
     /// Scrollback area narrowed for scrollbar (content rendering uses this).
@@ -172,7 +169,6 @@ impl AgentViewLayout {
         follow_ups_height: u16,
         startup_warning_height: u16,
         prompt_gap: u16,
-        voice_recording_height: u16,
         shortcuts_height: u16,
         compact: bool,
     ) -> Self {
@@ -248,9 +244,6 @@ impl AgentViewLayout {
         }
         if prompt_gap > 0 {
             constraints.push(Constraint::Length(prompt_gap));
-        }
-        if voice_recording_height > 0 {
-            constraints.push(Constraint::Length(voice_recording_height));
         }
         constraints.push(Constraint::Length(prompt_height));
         let shortcuts_gap = if bottom_vpad == 0 { 0u16 } else { 1 };
@@ -347,13 +340,6 @@ impl AgentViewLayout {
         if prompt_gap > 0 {
             i += 1;
         }
-        let voice_recording = if voice_recording_height > 0 {
-            let r = chunks[i];
-            i += 1;
-            r
-        } else {
-            Rect::default()
-        };
         let prompt = chunks[i];
         i += 1;
         if shortcuts_gap > 0 {
@@ -394,7 +380,6 @@ impl AgentViewLayout {
             banner,
             plugin_cta,
             follow_ups,
-            voice_recording,
             prompt,
             shortcuts,
             scrollback_content,
@@ -1026,9 +1011,6 @@ pub fn build_hints(
                     || def.id == ActionId::CommandPalette
                     || def.id == ActionId::Quit
                 {
-                    continue;
-                }
-                if def.id == ActionId::EnableVoiceMode || def.id == ActionId::VoiceToggle {
                     continue;
                 }
                 hints.push(def.hint());
@@ -1998,7 +1980,6 @@ mod tests {
             follow_ups_height,
             0,
             0,
-            0,
             1,
             false,
         )
@@ -2020,7 +2001,6 @@ mod tests {
             scrollbar_cfg,
             timeline_width,
             2,
-            0,
             0,
             0,
             0,

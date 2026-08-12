@@ -23,15 +23,8 @@ pub mod fs_notify;
 pub(crate) mod git_odb;
 pub mod handle;
 pub mod hub;
-pub mod hub_auth;
-pub mod hub_channel;
-pub mod hub_ids;
-pub mod hub_server;
-pub mod mcp;
 pub mod permission;
-pub mod preview_supervisor;
 pub mod project_config;
-pub mod recovery;
 mod restore_fetch;
 pub use restore_fetch::{EnsureCommitsOutcome, ensure_commits_reachable};
 pub use session::git::git_object_exists;
@@ -41,7 +34,6 @@ pub mod status_config;
 pub(crate) mod telemetry;
 pub use status_config::StatusConfig;
 pub mod trust;
-pub(crate) mod upload;
 pub mod util;
 pub mod workspace_ops;
 pub mod worktree;
@@ -54,27 +46,21 @@ pub use config::{
 pub use error::{WorkspaceError, WorkspaceResult};
 pub use file_system::*;
 pub use handle::{
-    DrainOutcome, DrainReason, WorkspaceHandle, connect_local_workspace, resolve_workspace_home,
-    termination_grace_from_env,
+    DrainOutcome, DrainReason, WorkspaceHandle, resolve_workspace_home, termination_grace_from_env,
 };
 pub use hub::HubConfig;
 pub use permission::*;
 pub use session::{WorkspaceSession, WorkspaceShared};
 pub use session::{file_state, git, jj};
-pub use upload::environment::{WorkspaceEnvironment, WorkspaceIdentity};
 pub use workspace_ops::{WorkspaceOp, WorkspaceOps};
-pub use xai_grok_workspace_client::WorkspaceClient;
 pub use xai_grok_workspace_types::WorkspaceEvent;
 pub use xai_hunk_tracker::HunkTrackerHandle;
 /// Zero-init every workspace metric family so idle panels render a `0` baseline
 /// instead of "No data". Idempotent; call once at workspace-server startup.
 pub fn init_metrics() {
     handle::init_metrics();
-    recovery::init_metrics();
     session::swap_policy::init_metrics();
-    upload::init_metrics();
     permission::init_metrics();
-    hub_server::init_metrics();
 }
 /// Crate-wide lock serializing every test that mutates the process-global
 /// environment (`GROK_HOME`, `HOME`, …). nextest isolates each test in its own
@@ -189,23 +175,6 @@ mod init_metrics_tests {
             "grok_workspace_rpc_errors_total",
             &[("method", "unknown"), ("error_kind", "unknown_method")]
         ));
-        for stage in [
-            "startup_recovery",
-            "tool_catalog",
-            "hub_ws_connect",
-            "connect_hub",
-            "time_to_ready",
-        ] {
-            for outcome in ["ok", "error"] {
-                assert!(
-                    has(
-                        "grok_workspace_startup_stage_duration_seconds",
-                        &[("stage", stage), ("outcome", outcome)]
-                    ),
-                    "missing baseline stage={stage} outcome={outcome}"
-                );
-            }
-        }
         assert!(has(
             "grok_workspace_drain_started_total",
             &[("reason", "sigterm")]

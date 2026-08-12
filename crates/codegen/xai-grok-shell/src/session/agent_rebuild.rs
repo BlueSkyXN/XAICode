@@ -131,8 +131,6 @@ pub(crate) struct AgentRebuildSpec {
     /// which is what clients read — keep the two on one resolve.
     pub scheduler_background_loops: bool,
     pub mcp_state: Arc<tokio::sync::Mutex<crate::session::mcp_servers::McpState>>,
-    pub managed_gateway_tool_client:
-        Option<xai_grok_tools::types::resources::ManagedGatewayToolClient>,
     pub is_non_interactive: bool,
     pub system_prompt_label: String,
     pub owner_session_id: Option<String>,
@@ -229,13 +227,11 @@ impl AgentRebuildSpec {
             path_not_found_hints,
             scheduler_background_loops,
             mcp_state,
-            managed_gateway_tool_client,
             is_non_interactive,
             system_prompt_label,
             owner_session_id,
             parent_scheduler_handle,
         } = self.as_ref();
-        let _ = mcp_state;
         #[allow(unused_variables)]
         let is_cursor_template =
             crate::session::is_cursor_system_template(&definition.system_prompt);
@@ -319,6 +315,7 @@ impl AgentRebuildSpec {
             builder = builder.with_preloaded_skills(skills);
         }
         let agent = builder.build().await?;
+        let _ = mcp_state;
         let model_validator = models_manager.clone();
         agent
             .tool_bridge()
@@ -382,9 +379,6 @@ impl AgentRebuildSpec {
                 *path_not_found_hints,
             ))
             .await;
-        if let Some(client) = managed_gateway_tool_client.clone() {
-            agent.tool_bridge().update_resource(client).await;
-        }
         {
             use xai_grok_tools::implementations::grok_build::ask_user_question::UserQuestionSender;
             agent
@@ -453,11 +447,10 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         blocking_wait_depth: Arc::new(crate::tools::tool_context::BlockingWaitState::new()),
         respect_gitignore: false,
         scheduler_background_loops: true,
-        path_not_found_hints: false,
         mcp_state: Arc::new(tokio::sync::Mutex::new(
             crate::session::mcp_servers::McpState::new(vec![]),
         )),
-        managed_gateway_tool_client: None,
+        path_not_found_hints: false,
         is_non_interactive: false,
         system_prompt_label: xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
         owner_session_id: Some("test-session".to_string()),

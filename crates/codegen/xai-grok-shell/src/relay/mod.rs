@@ -1,17 +1,15 @@
-//! Relay session sharing module.
+//! Hosted relay/session sharing was removed from the clean local build.
 //!
-//! Provides functionality for syncing TUI sessions to the relay backend
-//! via WebSocket, enabling cross-machine session persistence and real-time sharing.
-//!
-//! # Architecture
-//!
-//! - Local disk remains the source of truth
-//! - [`RelaySync`] streams updates to the relay in real-time
-//! - Reconnection is handled by `run_relay_loop` in the agent relay module
-//! - Connection state (Disconnected → Connecting → Connected) is observable via [`RelaySync::connection_state`]
-//! - Disk-based sync cursor (`relay_sync.json`) tracks last synced event for offline resilience
-pub mod sync;
-pub mod types;
+//! Local leader IPC lives under [`crate::leader`] and is intentionally kept
+//! separate from this retired hosted namespace.  The empty module remains as
+//! a source-compatibility anchor for downstream code that used the old path.
 
-pub use sync::{ConnectionState, RelaySync, RelaySyncState, StatusCallback, SyncStatus};
-pub use types::AgentType;
+/// Inert compatibility handle for local persistence. Session updates remain
+/// durable on disk; hosted relay/share delivery is no longer a consumer.
+#[derive(Clone, Default)]
+pub struct RelaySync;
+
+impl RelaySync {
+    pub fn queue(&self, _notification: agent_client_protocol::SessionNotification) {}
+    pub fn flush(&self) {}
+}

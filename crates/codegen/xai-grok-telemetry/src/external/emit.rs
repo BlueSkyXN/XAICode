@@ -150,8 +150,6 @@ pub(crate) fn emit_record(ext: &ExternalTelemetry, mut record: ExternalRecord) {
         }
     }
 
-    let identity = ext.identity.read().clone();
-
     if let (Some(event), Some(logger)) = (record.event, ext.logger.as_ref()) {
         let mut log_record = logger.create_log_record();
         log_record.set_event_name(event.as_str());
@@ -183,31 +181,12 @@ pub(crate) fn emit_record(ext: &ExternalTelemetry, mut record: ExternalRecord) {
         for (key, value) in &record.attrs {
             log_record.add_attribute(key.as_str(), to_any_value(value.clone()));
         }
-        for (key, value) in [
-            (ExternalKey::UserId, identity.user_id.as_deref()),
-            (
-                ExternalKey::OrganizationId,
-                identity.organization_id.as_deref(),
-            ),
-            (ExternalKey::TeamId, identity.team_id.as_deref()),
-            (ExternalKey::DeploymentId, identity.deployment_id.as_deref()),
-        ] {
-            if let Some(v) = value.filter(|v| !v.is_empty()) {
-                log_record.add_attribute(key.as_str(), v.to_owned());
-            }
-        }
         logger.emit(log_record);
     }
 
     if let Some(instruments) = ext.instruments.as_ref() {
         for increment in record.metrics {
-            add_increment(
-                ext,
-                instruments,
-                increment,
-                session_id.as_deref(),
-                &identity,
-            );
+            add_increment(ext, instruments, increment, session_id.as_deref());
         }
     }
 }
@@ -217,10 +196,10 @@ fn add_increment(
     instruments: &Instruments,
     increment: MetricIncrement,
     session_id: Option<&str>,
-    identity: &super::IdentityAttrs,
 ) {
-    // Identity/cardinality attrs shared by every instrument. `prompt.id` is
-    // deliberately never attached to metrics.
+    // Session/cardinality attrs shared by every instrument. `prompt.id` is
+    // deliberately never attached to metrics, and account identity is never
+    // attached to customer exports.
     let mut attrs: Vec<KeyValue> = Vec::with_capacity(8);
     if ext.include_session_id_on_metrics
         && let Some(sid) = session_id.filter(|s| !s.is_empty())
@@ -230,17 +209,6 @@ fn add_increment(
     if ext.include_version_on_metrics && !ext.app_version.is_empty() {
         attrs.push(KeyValue::new("app.version", ext.app_version.clone()));
     }
-    for (key, value) in [
-        ("user.id", identity.user_id.as_deref()),
-        ("organization.id", identity.organization_id.as_deref()),
-        ("team.id", identity.team_id.as_deref()),
-        ("deployment.id", identity.deployment_id.as_deref()),
-    ] {
-        if let Some(v) = value.filter(|v| !v.is_empty()) {
-            attrs.push(KeyValue::new(key, v.to_owned()));
-        }
-    }
-
     // `model` is the one non-enum metric attribute value: scrub it at
     // increment time (call-site discipline is never the guarantee on its own
     // — the PR 6 collector fixture pins this with a wire-payload canary).

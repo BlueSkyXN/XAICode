@@ -18,16 +18,18 @@ paths unreachable.
 
 ## Current provenance and version layers
 
-- Integrated source baseline: `grok-build@afbc0fb710320c7add294c2106d447ecc3e3af2e`,
-  upstream crate `1.0.0`, `SOURCE_REV` `3e620a76a5f374ce644dc7c87f7e990c68348218`.
+- Integrated source baseline: `grok-build@8a14c91d88875a831a38b3a066b1683116bcb31c`,
+  upstream crate `1.0.0`, `SOURCE_REV` `27b3c66635e2c0bf213429a36ab916f25d59df20`.
 - The XAICode composition package is the `0.2.0` release candidate. The prior rollback tag is
   `v0.1.1`; no `v0.2.0` tag or release exists until separately authorized. Keep package, future
   tag, `--version`, provenance, and artifact naming aligned when publishing.
-- Keep upstream distribution, public source and XAICode product versions separate. The recorded
-  public source observation is commit `afbc0fb710320c7add294c2106d447ecc3e3af2e`, crate `1.0.0`,
-  `SOURCE_REV` `3e620a76a5f374ce644dc7c87f7e990c68348218`; GitHub had no tag or Release
-  at that observation. npm `1.0.0` has a different `gitHead`, so the mapping is version-only
-  rather than commit-proven. Anchor syncs to an exact public commit, never an npm label alone.
+- Keep upstream distribution, public source and XAICode product versions separate. The latest
+  read-only public-source observation is commit
+  `be713136d2a69080743a3f6b3c72077057e5948f`, crate `1.0.1`, `SOURCE_REV`
+  `5d08d7e4123092567ccd584cd9f99afa2972065c`, three commits ahead of the integrated baseline.
+  npm's stable `latest` tag still points to `1.0.0` with a different `gitHead`; its `alpha` tag
+  points to `1.0.2`, also without an exact public-commit mapping. Anchor syncs to an exact public
+  commit, never an npm label alone.
 - On completed migration, update `README.md`, `CLEAN_BUILD.md`, `SOURCE_REV`, Cargo versions
   and `UPSTREAM.toml` together. Retain both public upstream commit and monorepo `SOURCE_REV`.
 
@@ -243,6 +245,9 @@ installation and live custom-provider acceptance are separate evidence stages.
 - The completed `0.2.114 -> 1.0.0` source migration overlapped the clean patch heavily in
   shell/pager. Future syncs must repeat the three-tree semantic review rather than assume the
   now-integrated tree can be overwritten.
+- The direct-child `afbc0fb -> 8a14c91` update removed the legacy managed-MCP config client.
+  Keep third-party MCP OAuth, but retain the production fail-closed guards around the separate
+  hosted gateway catalog/tool-call helpers.
 - `UPSTREAM.toml` separates the integrated baseline from the latest observed candidate; update
   the latter only after a fresh read-only upstream check.
 - `UPSTREAM_MIGRATION.md` is the current executable migration plan; keep its status, fixed refs,

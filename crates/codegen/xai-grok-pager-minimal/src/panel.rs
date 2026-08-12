@@ -486,7 +486,6 @@ fn render_mcps(
                 badge: badges[i].as_str(),
                 badge_color: badge_colors[i],
                 collapsible: collapsibles[i],
-                underline_last_desc: false,
             })
         })
         .collect();
@@ -571,7 +570,6 @@ mod tests {
             source: "local".to_string(),
             wire_source: McpWireSource::Local,
             plugin_name: None,
-            is_managed_gateway: false,
         }
     }
 

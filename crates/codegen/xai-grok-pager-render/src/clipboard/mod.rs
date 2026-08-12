@@ -673,9 +673,6 @@ fn log_clipboard_copy_event(
     toast_kind: &'static str,
     started: std::time::Instant,
 ) {
-    if !xai_grok_telemetry::client::is_enabled() {
-        return;
-    }
     xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::ClipboardCopy {
         terminal: crate::terminal::terminal_context().telemetry_snapshot(),
         source: "copy_text",
@@ -800,9 +797,6 @@ pub fn log_paste_key_empty_host_clipboard(surface: &str) {
         paste.surface = %surface,
         "paste_key_empty_host_clipboard"
     );
-    if !xai_grok_telemetry::client::is_enabled() {
-        return;
-    }
     xai_grok_telemetry::session_ctx::log_event(
         xai_grok_telemetry::events::PasteKeyEmptyHostClipboard {
             terminal,
@@ -1035,9 +1029,6 @@ fn log_clipboard_paste_event(
     image_mime: &str,
     started: std::time::Instant,
 ) {
-    if !xai_grok_telemetry::client::is_enabled() {
-        return;
-    }
     xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::ClipboardImagePaste {
         terminal: crate::terminal::terminal_context().telemetry_snapshot(),
         probe: probe.to_owned(),

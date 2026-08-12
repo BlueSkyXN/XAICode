@@ -11,7 +11,7 @@
 //! in normal Rust context (not actual signal-handler context), so it can use
 //! the full [`super::emit_terminal_teardown_sequences`] path
 //! (`with_locked_stderr`, conditional cursor-style reset, multiplexer flush) plus
-//! `disable_raw_mode`, then flush Sentry/OpenTelemetry, then exit.
+//! `disable_raw_mode`, then flush the local/generic diagnostics stream, then exit.
 //!
 //! SIGPIPE is intentionally left alone. The current disposition is `SIG_IGN`
 //! (Rust's stdlib default), which means writes to a closed pipe return
@@ -46,6 +46,12 @@ static QUIT_NOTIFY: parking_lot::Mutex<Option<std::sync::Arc<tokio::sync::Notify
 
 pub(crate) fn set_quit_notify(notify: std::sync::Arc<tokio::sync::Notify>) {
     *QUIT_NOTIFY.lock() = Some(notify);
+}
+
+/// Deregister the quit notify once the event loop has exited; a later first
+/// signal force-exits instead of notifying nobody.
+pub(crate) fn clear_quit_notify() {
+    *QUIT_NOTIFY.lock() = None;
 }
 
 /// Whether the TUI currently owns the terminal. Set by [`install`], cleared
@@ -197,15 +203,22 @@ fn request_graceful_or_exit(code: i32) {
     if TERMINAL_OWNED.load(Ordering::Acquire)
         && let Some(n) = notify
     {
+        // An orphan never gets the second, forcing signal; bound the quit.
+        super::exit_timeout::arm(code);
         n.notify_one();
     } else {
         shutdown_with_terminal_restore(code);
     }
 }
 
-/// Restore the terminal first, then flush observability, then exit.
+/// The second-signal teardown, exposed for the exit-timeout path.
+pub(crate) fn force_exit(exit_code: i32) -> ! {
+    shutdown_with_terminal_restore(exit_code)
+}
+
+/// Restore the terminal first, then flush local/generic observability, then exit.
 ///
-/// Restore must precede the (up to 2-second) Sentry flush; otherwise the
+/// Restore must precede the bounded diagnostics flush; otherwise the
 /// user stares at a raw-mode + alt-screen + mouse-SGR terminal for that
 /// whole window. Best-effort: a frame queued on the writer thread microseconds
 /// before the signal can still land after our teardown writes -- the writer
@@ -244,6 +257,7 @@ fn flush_telemetry_and_exit(exit_code: i32) -> ! {
     xai_tty_utils::global_process_scope().kill_all();
     // Restore fd 2 before the final local exit.
     xai_tty_utils::restore_native_stderr();
+    xai_grok_telemetry::external::shutdown();
     std::process::exit(exit_code);
 }
 

@@ -220,8 +220,6 @@ async fn run_prompt(
             PromptMode::Agent,
             None,
             None,
-            None,
-            None,
             true,
             None,
             None,

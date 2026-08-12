@@ -62,16 +62,25 @@ pub(super) fn confirm_context_used(view: &mut AgentView, used: u64) {
 /// recorded on the open reload window instead (see
 /// [`AgentView::mark_reload_replay_seen`]). One `warn!` per incident; the rest
 /// of the burst (one line per replayed event) logs at `debug!`.
-pub(super) fn drop_unexpected_replay(
+///
+/// After `SessionLoaded` the barrier may release on an Unrelated ACP timeout
+/// while remaining `isReplay` still sits behind a foreign head. `late_replay_until`
+/// keeps accepting that tail until the first this-session live update or the
+/// grace expires.
+pub(crate) fn drop_unexpected_replay(
     agent: &mut AgentView,
     meta: &NotificationMeta,
     session_id: &str,
     source: &'static str,
 ) -> bool {
     if !meta.is_replay {
+        agent.late_replay_until = None;
         return false;
     }
-    if agent.session.loading_replay {
+    let within_late_grace = agent
+        .late_replay_until
+        .is_some_and(|deadline| std::time::Instant::now() < deadline);
+    if agent.session.loading_replay || within_late_grace {
         agent.mark_reload_replay_seen();
         return false;
     }
@@ -459,13 +468,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 .get("recap")
                 .is_some();
             child_view.set_session_recap_available(recap_visible);
-            let voice_visible = agent
-                .prompt
-                .slash_controller
-                .registry()
-                .get("voice")
-                .is_some();
-            child_view.set_voice_mode_available(voice_visible);
             let restricted = agent
                 .prompt
                 .slash_controller
@@ -473,9 +475,19 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 .restricted_commands();
             child_view.set_restricted_commands(&restricted);
             agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view));
-            if !agent.session.loading_replay {
+            if !agent.session.loading_replay && !meta.is_replay {
+                let parent_cwd = agent.session.cwd.clone();
+                let child_cwd = agent
+                    .subagent_sessions
+                    .get(&child_session_id)
+                    .and_then(|info| info.child_cwd.clone());
                 if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
-                    crate::app::subagent::replay_inherited_updates(child_view, &child_session_id);
+                    crate::app::subagent::replay_inherited_updates(
+                        child_view,
+                        &child_session_id,
+                        &parent_cwd,
+                        child_cwd.as_deref().map(std::path::Path::new),
+                    );
                 }
                 if let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) {
                     info.child_updates_replayed = true;
@@ -911,19 +923,12 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             use xai_grok_shell::sampling::types::ReasoningEffort;
             let new_model_id = acp::ModelId::new(model_id.clone());
             if !agent.session.models.available.contains_key(&new_model_id) {
-                if xai_grok_shell::agent::chat_modes::process_chat_mode_enabled() {
-                    agent.session.models.available.insert(
-                        new_model_id.clone(),
-                        acp::ModelInfo::new(new_model_id.clone(), model_id.clone()),
-                    );
-                } else {
-                    tracing::warn!(
-                        session_id = session_notif.session_id.0.as_ref(),
-                        model_id = %model_id,
-                        "ignoring ModelChanged broadcast — model not in local catalog"
-                    );
-                    return false;
-                }
+                tracing::warn!(
+                    session_id = session_notif.session_id.0.as_ref(),
+                    model_id = %model_id,
+                    "ignoring ModelChanged broadcast — model not in local catalog"
+                );
+                return false;
             }
             let effort = reasoning_effort
                 .as_deref()
@@ -1307,7 +1312,6 @@ pub(super) fn apply_retry_state(
     scrollback: &mut crate::scrollback::state::ScrollbackState,
     is_api_key_auth: bool,
 ) {
-    let mut is_credit_limit = false;
     let mut is_reauth = false;
     use xai_grok_shell::extensions::notification::RetryState;
     match retry {
@@ -1342,14 +1346,7 @@ pub(super) fn apply_retry_state(
                     },
                 );
             }
-            is_credit_limit = super::super::dispatch::is_credit_limit_error(None, reason);
-            let is_free_usage = *rate_limited
-                && xai_grok_shell::sampling::error::is_free_usage_exhausted_error(reason);
-            if is_credit_limit {
-                session.credit_limit_blocked = true;
-            } else if is_free_usage {
-                session.free_usage_blocked = true;
-            } else if !*rate_limited && is_reauthable_failure(None, reason) {
+            if !*rate_limited && is_reauthable_failure(None, reason) {
                 is_reauth = true;
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
             } else if *rate_limited {
@@ -1376,10 +1373,7 @@ pub(super) fn apply_retry_state(
             if wire == crate::app::error_display::WireErrorType::EncryptedContentMismatch {
                 session.model_incompatible = true;
             }
-            is_credit_limit = super::super::dispatch::is_credit_limit_error(None, message);
-            if is_credit_limit {
-                session.credit_limit_blocked = true;
-            } else if is_reauthable_failure(Some(error_type.as_str()), message) {
+            if is_reauthable_failure(Some(error_type.as_str()), message) {
                 is_reauth = true;
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
             } else if wire == crate::app::error_display::WireErrorType::DiskFull {
@@ -1410,16 +1404,7 @@ pub(super) fn apply_retry_state(
             }
         }
     }
-    if is_credit_limit {
-        xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::CreditLimitHit {
-            model_id: session
-                .models
-                .current
-                .as_ref()
-                .map(|m| m.0.to_string())
-                .unwrap_or_default(),
-        });
-    } else if !is_reauth {
+    if !is_reauth {
         session.in_flight_prompt = None;
     }
 }

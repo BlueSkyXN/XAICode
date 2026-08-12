@@ -141,9 +141,7 @@ fn fork_and_exit_parent() -> io::Result<()> {
 
 /// `OpenOptions` for a daemon-owned file (log or pidfile). On Unix it adds
 /// `O_NOFOLLOW` + mode `0600` as symlink/permission defense-in-depth; the
-/// per-tenant sandbox namespace is the primary control. Shared with the
-/// preview-proxy log (`preview_supervisor`) so both daemon-owned files get the
-/// same posture.
+/// per-tenant sandbox namespace is the primary control.
 #[cfg(unix)]
 pub(crate) fn daemon_file_options() -> OpenOptions {
     use std::os::unix::fs::OpenOptionsExt;

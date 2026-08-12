@@ -1,20 +1,12 @@
 //! Async task-result application: routes task results into state.
-use super::auth::{
-    ensure_login_method, handle_auth_complete, handle_auth_url_ready, handle_mcp_auth_trigger_done,
-    handle_mcp_setup_submit_done,
-};
-use super::billing::{
-    PAYWALL_AUTO_CHECK_TIMEOUT, apply_auto_topup, handle_billing_fetched,
-    handle_check_subscription_complete, handle_credit_limit_recheck_complete,
-    handle_gate_refreshed, handle_gate_verify_timeout,
-};
+use super::auth::{handle_mcp_auth_trigger_done, handle_mcp_setup_submit_done};
 use super::cta::{
     handle_cta_plugin_install_done, handle_cta_plugin_reload_done,
     handle_plugin_cta_catalog_loaded, handle_plugin_cta_debounce_expired,
     handle_plugin_cta_mcps_loaded,
 };
 use super::ctx::{find_agent_by_session_id, get_active_agent_mut};
-use super::notes::{handle_btw_response, handle_memory_note_saved};
+use super::notes::handle_memory_note_saved;
 use super::prompt::{
     defer_to_open_reload_window, handle_compact_complete, handle_prompt_response,
     handle_suggestion_debounce_expired,
@@ -36,8 +28,7 @@ use super::session::lifecycle::{
 };
 use super::session::load::{
     handle_card_detail_loaded, handle_deep_search_results, handle_session_load_failed,
-    handle_session_loaded, handle_session_restore_failed, handle_session_restored,
-    handle_session_search_debounce_expired, remove_session_from_pickers,
+    handle_session_loaded, handle_session_search_debounce_expired, remove_session_from_pickers,
 };
 use super::session::modal::remove_agent_and_cleanup;
 use super::settings::ui::apply_setting_rollback;
@@ -57,7 +48,7 @@ use crate::app::actions::{
     TaskResult,
 };
 use crate::app::agent::AgentId;
-use crate::app::app_view::{ActiveView, AppView, AuthState};
+use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 use agent_client_protocol as acp;
 pub(super) fn unregister_session_effect(session_id: Option<acp::SessionId>) -> Vec<Effect> {
@@ -241,6 +232,9 @@ pub(crate) fn deliver_doctor_message(app: &mut AppView, preferred: AgentId, mess
 }
 /// Handle a completed async task result.
 pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec<Effect> {
+    if result.ends_startup() {
+        app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Ok);
+    }
     match result {
         TaskResult::SessionCreated {
             agent_id,
@@ -305,51 +299,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::ForkSessionFailed { agent_id, error } => {
             handle_fork_session_failed(app, agent_id, error)
         }
-        TaskResult::BillingFetched {
-            agent_id,
-            balance,
-            silent,
-            subscription_tier,
-            autotopup,
-            nonce,
-        } => handle_billing_fetched(
-            app,
-            agent_id,
-            balance,
-            silent,
-            subscription_tier,
-            autotopup,
-            nonce,
-        ),
-        TaskResult::BillingError {
-            agent_id,
-            error,
-            silent,
-            nonce,
-        } => {
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                if let Some(state) = usage_modal_state_mut(agent)
-                    && state.fetch_nonce == nonce
-                {
-                    state.billing_loading = false;
-                    state.billing_error = Some(error.clone());
-                }
-                if !silent {
-                    agent.scrollback.push_block(RenderBlock::System(
-                        crate::scrollback::blocks::SystemMessageBlock::new(format!(
-                            "Billing error: {error}"
-                        )),
-                    ));
-                }
-            }
-            vec![]
-        }
-        TaskResult::AppBillingFetched { balance, autotopup } => {
-            app.credit_balance = balance;
-            apply_auto_topup(&mut app.auto_topup, &autotopup);
-            vec![]
-        }
-        TaskResult::GateRefreshed { settings } => handle_gate_refreshed(app, settings),
         TaskResult::SessionLoaded {
             agent_id,
             session_id,
@@ -460,21 +409,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             generation,
             detail,
         } => handle_card_detail_loaded(app, source, session_id, generation, detail),
-        TaskResult::SessionRestored {
-            agent_id,
-            local_session_id,
-        } => handle_session_restored(app, agent_id, local_session_id),
-        TaskResult::SessionRestoreFailed { agent_id, error } => {
-            handle_session_restore_failed(app, agent_id, error)
-        }
-        TaskResult::SessionRestoreProgress { agent_id, message } => {
-            if let Some(agent) = app.agents.get_mut(&agent_id)
-                && !defer_to_open_reload_window(agent, agent_id, "SessionRestoreProgress")
-            {
-                agent.scrollback.push_block(RenderBlock::system(message));
-            }
-            vec![]
-        }
         TaskResult::PromptResponse {
             agent_id,
             result,
@@ -678,12 +612,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             deliver_doctor_message(app, target.agent_id, message);
             vec![]
         }
-        TaskResult::AnnouncementsHiddenPersisted { result } => {
-            if let Err(e) = result {
-                tracing::warn!("Failed to persist announcements hidden state: {}", e);
-            }
-            vec![]
-        }
         TaskResult::PromptHistoryLoaded { agent_id, prompts } => {
             use xai_grok_tools::implementations::skills::skill::extract_skill_display_text;
             if let Some(agent) = app.agents.get_mut(&agent_id) {
@@ -703,29 +631,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::AuthComplete { request_seq, meta } => {
-            handle_auth_complete(app, request_seq, meta)
-        }
-        TaskResult::AuthFailed { request_seq, error } => {
-            if let AuthState::Authenticating {
-                request_seq: current_seq,
-                ..
-            } = &app.auth_state
-                && *current_seq == request_seq
-            {
-                app.auth_state = AuthState::Pending { error: Some(error) };
-                app.auth_code_input.reset();
-            }
-            vec![]
-        }
-        TaskResult::AuthUrlReady {
-            request_seq,
-            auth_url,
-            external,
-            mode,
-        } => handle_auth_url_ready(app, request_seq, auth_url, external, mode),
-        TaskResult::AuthCodeSubmitted { .. } => vec![],
-        TaskResult::AuthCancelComplete => vec![],
+        // Account login/OIDC results are retained as wire-compatible variants,
+        // but the local build has no account-auth runtime to consume them.
+        TaskResult::AuthComplete { .. }
+        | TaskResult::AuthFailed { .. }
+        | TaskResult::AuthUrlReady { .. }
+        | TaskResult::AuthCodeSubmitted { .. }
+        | TaskResult::AuthCancelComplete => vec![],
         TaskResult::McpsListLoaded { agent_id, result } => {
             use crate::views::extensions_modal::TabDataState;
             if let Some(agent) = app.agents.get_mut(&agent_id)
@@ -838,29 +750,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::SkillsToggleDone { agent_id, result } => {
             handle_skills_toggle_done(app, agent_id, result)
-        }
-        TaskResult::ShareSessionComplete {
-            agent_id,
-            share_url,
-        } => {
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Session shared: {share_url}"
-                    )));
-            }
-            vec![]
-        }
-        TaskResult::ShareSessionFailed { agent_id, error } => {
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Couldn't share session: {error}"
-                    )));
-            }
-            vec![]
         }
         TaskResult::SessionAgentNameResolved {
             agent_id,
@@ -1117,17 +1006,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             format!("Couldn't load session usage: {error}"),
             nonce,
         ),
-        TaskResult::FeedbackComplete { .. } => vec![],
-        TaskResult::FeedbackFailed { agent_id, error } => {
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Couldn't send feedback: {error}"
-                    )));
-            }
-            vec![]
-        }
+        TaskResult::FeedbackComplete { .. } | TaskResult::FeedbackFailed { .. } => vec![],
         TaskResult::MemoryNoteSaved { agent_id, result } => {
             handle_memory_note_saved(app, agent_id, result)
         }
@@ -1201,11 +1080,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::BtwResponse {
-            agent_id,
-            result,
-            minimal_request_id,
-        } => handle_btw_response(app, agent_id, result, minimal_request_id),
+        TaskResult::BtwResponse { .. } => vec![],
         TaskResult::InterjectQueued { .. } => vec![],
         TaskResult::RecapRequested {
             session_id,
@@ -1271,40 +1146,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::PaywallCheckTick => {
-            let timed_out = app
-                .paywall_check_started
-                .is_some_and(|t| t.elapsed() >= PAYWALL_AUTO_CHECK_TIMEOUT);
-            if !app.has_access() && !timed_out {
-                vec![
-                    Effect::CheckSubscription { verify: None },
-                    Effect::SchedulePaywallCheck,
-                ]
-            } else {
-                vec![]
-            }
-        }
-        TaskResult::CheckSubscriptionComplete { verify, meta } => {
-            handle_check_subscription_complete(app, verify, meta)
-        }
-        TaskResult::GateVerifyTimeout { generation } => handle_gate_verify_timeout(app, generation),
-        TaskResult::CreditLimitRecheckComplete { agent_id, meta } => {
-            handle_credit_limit_recheck_complete(app, agent_id, meta)
-        }
-        TaskResult::LogoutComplete => {
-            app.auth_state = AuthState::Pending { error: None };
-            app.access_gate_shown_logged = false;
-            app.announcement_cta_impressions_logged.clear();
-            app.gate = None;
-            app.pending_gate_verification = None;
-            app.last_subscription_check_at = None;
-            app.login_method_id = None;
-            ensure_login_method(app);
-            app.auth_clipboard_delivery = None;
-            let effects = dispatch_exit_session(app);
-            app.welcome_prompt_focused = false;
-            effects
-        }
+        TaskResult::LogoutComplete => vec![],
         TaskResult::DeepSearchResults { results, seq } => {
             handle_deep_search_results(app, results, seq)
         }

@@ -38,7 +38,7 @@ fn populate_and_evict(agent: &MvpAgent, i: usize) {
 
     let (_ptx, prx) = tokio::sync::mpsc::unbounded_channel::<PermissionEvent>();
     agent.session_registry.set_permission_receiver(&sid, prx);
-    agent.set_turn_number(&sid, i as u64);
+    agent.session_registry.set_turn_number(&sid, i as u64);
     agent
         .session_registry
         .set_unavailable_model(&sid, acp::ModelId::new(std::sync::Arc::from("gone-model")));

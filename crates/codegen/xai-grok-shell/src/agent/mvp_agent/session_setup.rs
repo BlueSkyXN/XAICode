@@ -128,7 +128,6 @@ struct SessionWorkspace {
     remote_settings: Option<crate::util::config::RemoteSettings>,
     initial_client_mcp_servers: Vec<acp::McpServer>,
     mcp_servers: Vec<acp::McpServer>,
-    managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     mcp_meta_config_map: McpMetaConfigMap,
 }
 /// Open the telemetry session context, then describe the session for storage.
@@ -176,7 +175,7 @@ impl MvpAgent {
             .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
         let remote_settings = self.cfg.borrow().remote_settings.clone();
         folder_trust::resolve_and_record(cwd.as_path(), remote_settings.as_ref(), false);
-        let (initial_client_mcp_servers, mcp_servers, managed_mcp_expires_at) = self
+        let (initial_client_mcp_servers, mcp_servers) = self
             .resolve_mcp_servers(client_mcp_servers, cwd.as_path())
             .await;
         Ok(SessionWorkspace {
@@ -184,7 +183,6 @@ impl MvpAgent {
             remote_settings,
             initial_client_mcp_servers,
             mcp_servers,
-            managed_mcp_expires_at,
             mcp_meta_config_map: parse_mcp_meta_config(meta),
         })
     }
@@ -195,27 +193,15 @@ impl MvpAgent {
         session_id: &acp::SessionId,
         session_info: &crate::session::info::Info,
     ) -> Option<crate::relay::RelaySync> {
-        let sync = self.create_relay_sync(&session_id.0, session_info)?;
-        Self::spawn_relay_state_forwarder(
-            sync.subscribe_state(),
-            sync.session_id().to_owned(),
-            self.gateway.clone(),
-        );
-        Some(sync)
+        let _ = (self, session_id, session_info);
+        None
     }
     /// Where generated titles are pushed, suppressed for ZDR teams.
     fn registry_title_sync(
         &self,
     ) -> Option<crate::session::persistence::RegistryGeneratedTitleSync> {
-        self.session_registry_client().map(|client| {
-            crate::session::persistence::RegistryGeneratedTitleSync {
-                client,
-                suppress_for_zdr: self
-                    .auth_manager
-                    .current_or_expired()
-                    .is_some_and(|a| a.is_zdr_team()),
-            }
-        })
+        let _ = self;
+        None
     }
 }
 impl MvpAgent {
@@ -235,7 +221,6 @@ impl MvpAgent {
             remote_settings,
             initial_client_mcp_servers,
             mcp_servers,
-            managed_mcp_expires_at,
             mcp_meta_config_map,
         } = self
             .resolve_workspace(
@@ -328,26 +313,10 @@ impl MvpAgent {
         let mut disallowed_custom: Option<String> = None;
         let session_initial_model = chat_initial_model(is_chat_kind, custom_model_id);
         let build_custom_model_id = if is_chat_kind { None } else { custom_model_id };
-        let campaign_nudge = if is_chat_kind {
-            None
-        } else {
-            crate::util::config::campaign_driven_models_default().filter(|c| {
-                build_custom_model_id.is_none()
-                    || build_custom_model_id == c.pre_campaign.as_deref()
-                    || build_custom_model_id == Some(c.value.as_str())
-            })
-        };
-        let campaign_nudged = campaign_nudge.is_some();
-        if let Some(c) = &campaign_nudge {
-            tracing::info!(
-                model = %c.value,
-                requested = ?custom_model_id,
-                "new_session: applying campaign-driven default model"
-            );
-        }
-        let build_custom_model_id: Option<String> = campaign_nudge
-            .map(|c| c.value)
-            .or_else(|| build_custom_model_id.map(str::to_owned));
+        // Campaign-driven model nudges are a hosted product consumer. Keep
+        // the configured/default model selection stable in the local build.
+        let campaign_nudged = false;
+        let build_custom_model_id: Option<String> = build_custom_model_id.map(str::to_owned);
         let resolved_custom_model = build_custom_model_id
             .as_deref()
             .and_then(|custom_model| match self
@@ -437,7 +406,7 @@ impl MvpAgent {
             .await
             .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?
         };
-        self.set_turn_number(&session_id, 0u64);
+        self.session_registry.set_turn_number(&session_id, 0u64);
         let chat_history = vec![];
         let ClientCaps {
             code_nav: client_code_nav_enabled,
@@ -473,14 +442,13 @@ impl MvpAgent {
                     client_terminal,
                     client_fs_read,
                     client_fs_write,
-                    preloaded_envrc: None,
+                    envrc: None,
                     persisted_signals: None,
                     persisted_plan_mode: None,
                     persisted_goal_mode: None,
                     persisted_workflow_runs: Vec::new(),
                     persisted_announcement_state: None,
                     session_meta: arguments.meta.as_ref(),
-                    managed_mcp_expires_at,
                     model_agent_type: model_agent_type.as_deref(),
                     session_model_id,
                     session_yolo_mode,
@@ -507,8 +475,8 @@ impl MvpAgent {
             remote_settings.as_ref(),
         );
         let bridge_attach = BridgeAttach::NotAttached;
-        let product_analytics = self.product_analytics_enabled();
-        if product_analytics || xai_grok_telemetry::external::is_active() {
+        let product_analytics = false;
+        if xai_grok_telemetry::external::is_active() {
             let sid = session_id.0.to_string();
             let ci = client_identifier.clone();
             let cv = self.client_version();
@@ -595,14 +563,7 @@ impl MvpAgent {
             Some(session_id.0.as_ref()),
             Some(serde_json::json!({"cwd": cwd.as_str()})),
         );
-        let models = if is_chat_kind {
-            chat_new_session_model_state(
-                self.chat_modes.model_state().await,
-                session_initial_model.filter(|_| matches!(bridge_attach, BridgeAttach::Spawned)),
-            )
-        } else {
-            self.model_state(Some(&session_id))
-        };
+        let models = self.model_state(Some(&session_id));
         let applied_tool_overrides = match self.session_handle_waiting_for_load(&session_id).await {
             Some(handle) => read_applied_tool_overrides(&handle.cmd_tx).await,
             None => {
@@ -682,7 +643,6 @@ impl MvpAgent {
             remote_settings,
             initial_client_mcp_servers,
             mcp_servers,
-            managed_mcp_expires_at,
             mcp_meta_config_map,
         } = self
             .resolve_workspace(&cwd, client_mcp_servers, request_meta.as_ref())
@@ -734,18 +694,12 @@ impl MvpAgent {
         let relay_sync = self.start_relay_sync(&session_id, &session_info);
         let mut persistence_timer = crate::instrumentation_timer!("session.load_light");
         persistence_timer.with_field("session_id", session_id.0.as_ref());
-        let backend = if self.build_registry_config().is_some() {
-            Some(crate::remote::BackendClient::new().with_auth_manager(self.auth_manager.clone()))
-        } else {
-            None
-        };
         let registry_title_sync = self.registry_title_sync();
         let (persistence_info, persistence) = crate::session::persistence::load_light(
             &session_info,
             summary_client,
             self.storage_mode.get(),
             Some(self.auth_manager.clone()),
-            backend.as_ref(),
             relay_sync,
             Some(self.gateway.clone()),
             summary_model,
@@ -768,7 +722,8 @@ impl MvpAgent {
         } = persistence_info;
         let restored =
             RestoredSignals::read(persisted_signals.as_ref(), persisted_plan_mode.as_ref());
-        self.set_turn_number(&session_id, summary.next_trace_turn);
+        self.session_registry
+            .set_turn_number(&session_id, summary.next_trace_turn);
         tracing::info!(
             session_id = %session_id.0,
             next_trace_turn = summary.next_trace_turn,
@@ -806,6 +761,19 @@ impl MvpAgent {
                 self.cfg.borrow().session.load_envrc.unwrap_or(true)
             }
         };
+        let envrc = if !load_envrc {
+            Some(xai_grok_workspace::envrc::spawn_envrc_load(
+                cwd.as_path().to_path_buf(),
+                false,
+            ))
+        } else if session_exists {
+            None
+        } else {
+            Some(xai_grok_workspace::envrc::spawn_envrc_load(
+                cwd.as_path().to_path_buf(),
+                folder_trust::project_scope_allowed(cwd.as_path()),
+            ))
+        };
         let (initial_total_tokens, unfinished_subagents) = self
             .replay_transcript_gate(
                 &session_id,
@@ -819,10 +787,6 @@ impl MvpAgent {
                 no_replay,
             )
             .await?;
-        let preloaded_envrc = xai_grok_workspace::envrc::load_envrc_or_empty_when_trusted(
-            cwd.as_path(),
-            load_envrc && folder_trust::project_scope_allowed(cwd.as_path()),
-        );
         let ClientCaps {
             code_nav: client_code_nav_enabled,
             terminal: client_terminal,
@@ -865,14 +829,13 @@ impl MvpAgent {
                     client_terminal,
                     client_fs_read,
                     client_fs_write,
-                    preloaded_envrc: Some(preloaded_envrc),
+                    envrc,
                     persisted_signals,
                     persisted_plan_mode,
                     persisted_goal_mode: _persisted_goal_mode,
                     persisted_workflow_runs,
                     persisted_announcement_state,
                     session_meta: request_meta.as_ref(),
-                    managed_mcp_expires_at,
                     model_agent_type: persisted_agent_name.as_deref(),
                     session_model_id: summary.current_model_id.clone(),
                     session_yolo_mode,
@@ -960,7 +923,7 @@ impl MvpAgent {
                 let _ = handle.cmd_tx.send(SessionCommand::RestorePlanApproval);
             }
         }
-        if self.product_analytics_enabled() {
+        if xai_grok_telemetry::external::is_active() {
             log_event(xai_grok_telemetry::events::SessionLoad {
                 session_id: session_id.0.to_string(),
                 compaction_count: restored.compaction_count,
@@ -991,10 +954,6 @@ impl MvpAgent {
         summary: &crate::session::persistence::Summary,
         restore_code_requested: bool,
     ) -> Option<serde_json::Value> {
-        let registry_client_for_restore = self.session_registry_client();
-        if restore_code_requested && registry_client_for_restore.is_none() {
-            xai_grok_workspace::session::git::warn_registry_disabled_restore(session_id.0.as_ref());
-        }
         let restore_checkout_allowed =
             xai_grok_workspace::session::git::restore_code_checkout_allowed(
                 cwd.as_path(),
@@ -1038,13 +997,8 @@ impl MvpAgent {
             let kind = if !outcome.checked_out {
                 RestoreKind::CheckoutFailed
             } else {
-                match registry_client_for_restore {
-                    None => RestoreKind::RegistryOff,
-                    Some(registry_client) => {
-                        let _ = registry_client;
-                        RestoreKind::RegistryOff
-                    }
-                }
+                // Code checkout remains local; the hosted registry is gone.
+                RestoreKind::RegistryOff
             };
             code_restore_info =
                 crate::agent::restore_code::build_code_restore_meta(target_sha, &outcome, kind);
@@ -1433,9 +1387,8 @@ impl MvpAgent {
         if !args.additional_directories.is_empty() {
             return Err(acp::Error::invalid_params().data(RESUME_REFUSES_EXTRA_DIRS));
         }
-        if crate::agent::chat_modes::process_chat_mode_enabled()
-            || ChatKindClaim::from_meta(args.meta.as_ref()).resolve(self, &args.session_id)
-                == SessionKind::Chat
+        if ChatKindClaim::from_meta(args.meta.as_ref()).resolve(self, &args.session_id)
+            == SessionKind::Chat
         {
             return Err(acp::Error::invalid_params().data(RESUME_REFUSES_CHAT));
         }

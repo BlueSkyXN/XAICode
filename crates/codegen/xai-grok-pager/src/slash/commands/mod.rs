@@ -4,7 +4,6 @@
 //! command structs and provides `builtin_commands()` for registry
 //! construction.
 pub mod always_approve;
-pub mod announcements;
 pub mod auto;
 pub mod btw;
 pub mod cd;
@@ -24,15 +23,12 @@ pub mod effort_levels;
 pub mod exit;
 pub mod expand;
 pub mod export;
-pub mod feedback;
 pub mod find;
 pub mod fork;
 pub mod gboom;
 pub mod help;
 pub mod history;
 pub mod home;
-pub mod imagine;
-pub mod imagine_video;
 pub mod import_claude;
 pub mod jump;
 pub mod login;
@@ -57,7 +53,6 @@ pub mod screen_mode_switch;
 pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
-pub mod share;
 pub mod tasks;
 pub mod theme;
 pub mod timeline;
@@ -68,7 +63,6 @@ pub mod tutorial;
 pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;
-pub mod voice;
 pub mod workflows;
 use super::command::SlashCommand;
 use std::sync::Arc;
@@ -108,14 +102,11 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(plugin::PluginsCommand),
         Arc::new(plugin::MarketplaceCommand),
         Arc::new(plugin::SkillsCommand),
-        Arc::new(share::ShareCommand),
         Arc::new(session_info::SessionInfoCommand),
         Arc::new(rename::RenameCommand),
         Arc::new(dashboard::DashboardCommand),
         Arc::new(cd::CdCommand),
         Arc::new(theme::ThemeCommand),
-        Arc::new(feedback::FeedbackCommand),
-        Arc::new(announcements::AnnouncementsCommand),
         Arc::new(remember::RememberCommand),
         Arc::new(plan::PlanCommand),
         Arc::new(view_plan::ViewPlanCommand),
@@ -125,10 +116,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(btw::BtwCommand),
         Arc::new(recap::RecapCommand),
         Arc::new(doctor::DoctorCommand),
-        Arc::new(voice::VoiceCommand),
         Arc::new(loop_cmd::LoopCommand),
-        Arc::new(imagine::ImagineCommand),
-        Arc::new(imagine_video::ImagineVideoCommand),
         Arc::new(timestamps::TimestampsCommand),
         Arc::new(timeline::TimelineCommand),
         Arc::new(toggle_mouse_reporting::ToggleMouseReportingCommand),
@@ -729,18 +717,6 @@ mod tests {
         assert!(reg.get("recap").is_none());
         reg.set_recap_visible(false);
         assert!(reg.get("recap").is_none());
-    }
-    #[test]
-    fn voice_hidden_by_default_in_registry_until_revealed() {
-        let mut reg = CommandRegistry::new(builtin_commands());
-        assert!(
-            reg.get("voice").is_none(),
-            "/voice is removed from the clean build"
-        );
-        reg.set_voice_visible(true);
-        assert!(reg.get("voice").is_none());
-        reg.set_voice_visible(false);
-        assert!(reg.get("voice").is_none());
     }
     /// Every pager builtin trigger key must appear in the shell's
     /// `PAGER_COMMAND_KEYS`. Add new names there when adding a pager builtin.

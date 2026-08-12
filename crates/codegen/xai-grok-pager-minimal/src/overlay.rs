@@ -648,10 +648,7 @@ fn render_permission(
         width: iarea.text_w,
         height,
     };
-    agent
-        .prompt
-        .draw(buf, rect, None, &style, None, None)
-        .cursor_pos
+    agent.prompt.draw(buf, rect, None, &style, None).cursor_pos
 }
 
 fn render_question(
@@ -772,7 +769,7 @@ fn render_question(
         };
         return agent
             .prompt
-            .draw(buf, editor, None, &style, None, None)
+            .draw(buf, editor, None, &style, None)
             .cursor_pos;
     }
     None
@@ -835,7 +832,6 @@ fn render_feedback_editor(
             None,
             &style,
             outlined.then_some(&PromptInfo::default()),
-            None,
         )
         .cursor_pos
 }

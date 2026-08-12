@@ -65,8 +65,8 @@ pub use auto_mode::{
     parse_classifier_model_output, parse_classifier_model_text, permission_decision_args,
 };
 pub use hub_permission::{
-    PermissionHookTransport, ToolServerPermissionTransport, access_kind_for_hub_tool,
-    hitl_permission_live_enabled, prompt_outcome_allows, request_permission_via_hub,
+    PermissionHookTransport, access_kind_for_hub_tool, hitl_permission_live_enabled,
+    prompt_outcome_allows, request_permission_via_hub,
 };
 
 /// Zero-init this module's metric families. See [`crate::init_metrics`].

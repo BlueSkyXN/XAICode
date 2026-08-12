@@ -494,15 +494,8 @@ impl SessionActor {
             stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),
             idle_timeout_secs: None,
             client_identifier: self.client_identifier.clone(),
-            deployment_id: crate::managed_config::resolve_deployment_id(
-                crate::managed_config::resolve_deployment_key().as_deref(),
-            ),
-            user_id: self
-                .auth_manager
-                .as_ref()
-                .and_then(|am| am.current_or_expired())
-                .filter(|a| a.is_xai_auth())
-                .map(|a| a.user_id),
+            deployment_id: None,
+            user_id: None,
             origin_client: self.origin_client.clone(),
             attribution_callback: self.attribution_callback.clone(),
             bearer_resolver: if use_bearer_resolver {
@@ -612,7 +605,7 @@ impl SessionActor {
                             format!("xai-perm-auto-{}", uuid::Uuid::new_v4()),
                         ),
                         x_grok_session_id: Some(session_id),
-                        x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
+                        x_grok_agent_id: None,
                         ..ConversationRequest::default()
                     };
                     let fut = sampling_client.conversation_collect(request);
@@ -1017,13 +1010,6 @@ impl SessionActor {
                     "empty response after retries exhausted: {reason}",
                     reason = ctx.reason,
                 );
-                {
-                    let mut cap = self.streaming_turn_capture.lock();
-                    cap.reasoning_tokens = ctx.reasoning_tokens;
-                    cap.completion_tokens = ctx.completion_tokens;
-                    cap.finish_reason = ctx.finish_reason.clone();
-                    cap.empty_reason = Some(ctx.reason.as_str().to_owned());
-                }
             }
             self.signals_handle().record_error_typed("empty_response");
         }

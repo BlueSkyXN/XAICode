@@ -1,11 +1,10 @@
 //! Tool config resolution pipeline.
 //!
-//! Five-step resolution:
+//! Four-step resolution:
 //! 1. `effective_tool_config = config.tool_config.unwrap_or_else(|| parent.effective_tool_config.clone())`
 //! 2. `merged = merge_mcp_tools(effective_tool_config, shared.mcp_servers.snapshot())`
-//! 3. `merged = merge_hub_tools(merged, shared.hub_tools_snapshot())`
-//! 4. `filtered = config.capability_mode.filter(merged)`
-//! 5. `toolset = build_finalized_toolset(filtered, &session.cwd, &session.session_env, ...)`
+//! 3. `filtered = config.capability_mode.filter(merged)`
+//! 4. `toolset = build_finalized_toolset(filtered, &session.cwd, &session.session_env, ...)`
 use crate::capability::{CapabilityMode, kind_allowed};
 use crate::config::SessionContextFactory;
 use crate::error::{WorkspaceError, WorkspaceResult};
@@ -19,14 +18,13 @@ use xai_grok_tools::types::tool::ToolKind;
 /// Create-shaped entry of the resolution pipeline: run
 /// [`resolve_session_toolset_rebuild`] around a FRESH factory-built
 /// session-lifetime terminal backend, and return that backend so the caller
-/// can store it on the session it is creating. Session-less resolves (the
-/// `__template__` catalog resolve in `connect_hub`) also use this entry and
+/// can store it on the session it is creating. Session-less local resolves
+/// also use this entry and
 /// simply drop the returned backend with the toolset.
 pub(crate) fn resolve_session_toolset(
     effective_tool_config: ToolServerConfig,
     capability_mode: CapabilityMode,
     mcp_snapshot: &[ToolConfig],
-    hub_snapshot: &[ToolConfig],
     cwd: PathBuf,
     session_env: Arc<HashMap<String, String>>,
     session_id: &str,
@@ -45,7 +43,6 @@ pub(crate) fn resolve_session_toolset(
         effective_tool_config,
         capability_mode,
         mcp_snapshot,
-        hub_snapshot,
         cwd,
         session_env,
         session_id,
@@ -66,10 +63,10 @@ pub(crate) fn resolve_session_toolset(
 ///
 /// Returns the *unmodified* `effective_tool_config` (step-1 baseline) so
 /// the caller can store it on the session. The FinalizedToolset reflects
-/// MCP + hub merging and capability filtering on top of that baseline.
+/// local MCP merging and capability filtering on top of that baseline.
 ///
-/// **MCP-origin and hub-origin `kind: None` tools are dropped under
-/// every non-`All` mode.** Baseline `kind: None` tools are always kept —
+/// **MCP-origin `kind: None` tools are dropped under every non-`All` mode.**
+/// Baseline `kind: None` tools are always kept —
 /// but before filtering, kind-less baseline entries whose id the binary's
 /// registry knows get their [`ToolKind`] backfilled (see
 /// [`backfill_tool_kinds`]), so the capability filter applies to pinned
@@ -78,7 +75,6 @@ pub(crate) fn resolve_session_toolset_rebuild(
     effective_tool_config: ToolServerConfig,
     capability_mode: CapabilityMode,
     mcp_snapshot: &[ToolConfig],
-    hub_snapshot: &[ToolConfig],
     cwd: PathBuf,
     session_env: Arc<HashMap<String, String>>,
     session_id: &str,
@@ -94,22 +90,9 @@ pub(crate) fn resolve_session_toolset_rebuild(
         builder = builder.with_local_registry(lr);
     }
     let baseline = backfill_tool_kinds(&effective_tool_config, &builder.known_tool_kinds());
-    let filtered = merge_and_filter(
-        &baseline,
-        mcp_snapshot,
-        hub_snapshot,
-        capability_mode,
-        session_id,
-    );
-    let hub_ids: std::collections::HashSet<&str> =
-        hub_snapshot.iter().map(|t| t.id.as_str()).collect();
+    let filtered = merge_and_filter(&baseline, mcp_snapshot, capability_mode, session_id);
     let finalize_config = ToolServerConfig {
-        tools: filtered
-            .tools
-            .iter()
-            .filter(|t| !hub_ids.contains(t.id.as_str()))
-            .cloned()
-            .collect(),
+        tools: filtered.tools,
         behavior_preset: filtered.behavior_preset.clone(),
     };
     let mut ctx = factory.build_session_context(session_id, cwd, session_env, terminal_backend);
@@ -160,19 +143,17 @@ fn backfill_tool_kinds(
 /// Steps 2-4 of the resolution pipeline, without step 5 (`finalize`):
 ///
 /// - **Step 2** -- MCP merge: append MCP-origin tools, skipping ID/name collisions with baseline.
-/// - **Step 3** -- Hub merge: append hub-origin tools, skipping ID/name collisions with baseline or MCP.
-/// - **Step 4** -- Capability filter: drop tools whose `kind` is not allowed by the mode.
-///   External (MCP/hub) `kind: None` tools are only kept under `CapabilityMode::All`.
+/// - **Step 3** -- Capability filter: drop tools whose `kind` is not allowed by the mode.
+///   MCP `kind: None` tools are only kept under `CapabilityMode::All`.
 ///
-/// Priority on ID/name collision: baseline wins > MCP wins > hub is skipped.
+/// Priority on ID/name collision: baseline wins over MCP.
 pub(crate) fn merge_and_filter(
     baseline: &ToolServerConfig,
     mcp_snapshot: &[ToolConfig],
-    hub_snapshot: &[ToolConfig],
     mode: CapabilityMode,
     session_id: &str,
 ) -> ToolServerConfig {
-    if mcp_snapshot.is_empty() && hub_snapshot.is_empty() {
+    if mcp_snapshot.is_empty() {
         return mode.filter(baseline);
     }
     let baseline_ids: std::collections::HashSet<&str> =
@@ -187,7 +168,6 @@ pub(crate) fn merge_and_filter(
         .collect();
     let mut tagged: Vec<(ToolConfig, bool)> =
         baseline.tools.iter().cloned().map(|t| (t, false)).collect();
-    let mut mcp_tool_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for mcp_tool in mcp_snapshot {
         if baseline_ids.contains(mcp_tool.id.as_str()) {
             tracing::warn!(
@@ -207,37 +187,7 @@ pub(crate) fn merge_and_filter(
             );
             continue;
         }
-        mcp_tool_ids.insert(mcp_tool.id.as_str());
         tagged.push((mcp_tool.clone(), true));
-    }
-    for hub_tool in hub_snapshot {
-        if baseline_ids.contains(hub_tool.id.as_str()) {
-            tracing::debug!(
-                hub_id = %hub_tool.id,
-                session = %session_id,
-                "skipping remote tool: id collides with baseline"
-            );
-            continue;
-        }
-        if mcp_tool_ids.contains(hub_tool.id.as_str()) {
-            tracing::debug!(
-                hub_id = %hub_tool.id,
-                session = %session_id,
-                "skipping remote tool: id collides with MCP tool"
-            );
-            continue;
-        }
-        let client_name = hub_tool.resolve_client_name(&hub_tool.id);
-        if !taken_names.insert(client_name.clone()) {
-            tracing::debug!(
-                hub_id = %hub_tool.id,
-                client_name = %client_name,
-                session = %session_id,
-                "skipping remote tool: resolved client name collides with another tool"
-            );
-            continue;
-        }
-        tagged.push((hub_tool.clone(), true));
     }
     let kept: Vec<ToolConfig> = tagged
         .into_iter()
@@ -266,7 +216,7 @@ pub fn tool_state_enabled() -> bool {
 /// replacement happened, an 8-hex digest of the ORIGINAL id is appended so the
 /// mapping stays injective — plain substitution would collide distinct ids
 /// (`sess/1` and `sess_1`) into one directory, cross-contaminating
-/// persistence, rehydration, and [`crate::recovery::cleanup_stale_sessions`].
+/// persistence and rehydration.
 /// Already-safe ids (the common UUID case) map to themselves.
 fn sanitize_session_id(session_id: &str) -> String {
     let mut safe = String::with_capacity(session_id.len());
@@ -304,9 +254,9 @@ fn ensure_session_dir(root: &std::path::Path, session_id: &str) -> (PathBuf, std
 pub(crate) use crate::ENV_TEST_LOCK as TOOL_STATE_ENV_LOCK;
 /// [`SessionContextFactory`] for workspace server sessions.
 ///
-/// When constructed with an [`AuthProvider`] and API base URL, gen tools
-/// (image_gen, video_gen) are enabled using the provider's current
-/// OAuth token. Without auth, gen tools default to `Disabled`.
+/// When constructed with an [`AuthProvider`] and API base URL, the optional
+/// compatibility search configuration may be populated. Hosted media
+/// generation is intentionally not part of a session context.
 ///
 /// When [`with_tool_state_home`](Self::with_tool_state_home) is set, each
 /// session's [`SessionContext::state_path`] is rooted at
@@ -405,76 +355,33 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
         backend: Arc<dyn xai_grok_tools::computer::types::TerminalBackend>,
     ) -> xai_grok_tools::registry::types::SessionContext {
         use xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig;
-        use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
-        use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
         use xai_grok_tools::implementations::web_search::WebSearchConfig;
         let fs = Arc::new(xai_grok_tools::computer::local::LocalFs)
             as Arc<dyn xai_grok_tools::computer::types::AsyncFileSystem>;
         let notification_handle = xai_grok_tools::notification::ToolNotificationHandle::noop();
-        let (
-            mut image_gen_config,
-            mut video_gen_config,
-            mut web_search_config,
-            mut app_builder_deployer_config,
-        ) = if let (Some(auth), Some(url)) = (&self.auth, &self.api_base_url) {
-            let cred = auth.current();
-            match cred {
-                xai_computer_hub_sdk::AuthCredential::Bearer { token, .. } => {
-                    let headers = build_proxy_headers(url);
-                    (
-                        ImageGenConfig::Enabled {
-                            api_key: token.clone(),
-                            base_url: url.clone(),
-                            extra_headers: headers.clone(),
-                            image_gen_enabled: true,
-                            image_edit_enabled: true,
-                            model_override: None,
-                            edit_model_override: None,
-                            tier_restricted: false,
-                        },
-                        VideoGenConfig::Enabled {
-                            api_key: token.clone(),
-                            base_url: url.clone(),
-                            extra_headers: headers.clone(),
-                            zdr_video_output_s3: None,
-                            tier_restricted: false,
-                        },
+        let mut web_search_config =
+            if let (Some(auth), Some(url)) = (&self.auth, &self.api_base_url) {
+                let cred = auth.current();
+                match cred {
+                    xai_computer_hub_sdk::AuthCredential::Bearer { token, .. } => {
+                        let headers = build_proxy_headers(url);
                         WebSearchConfig::Enabled {
                             api_key: token,
                             base_url: url.clone(),
                             model: default_web_search_model(),
                             extra_headers: headers,
                             alpha_test_key: None,
-                        },
-                        AppBuilderDeployerConfig::default(),
-                    )
+                        }
+                    }
+                    _ => WebSearchConfig::default(),
                 }
-                _ => (
-                    ImageGenConfig::default(),
-                    VideoGenConfig::default(),
-                    WebSearchConfig::default(),
-                    AppBuilderDeployerConfig::default(),
-                ),
-            }
-        } else {
-            (
-                ImageGenConfig::default(),
-                VideoGenConfig::default(),
-                WebSearchConfig::default(),
-                AppBuilderDeployerConfig::default(),
-            )
-        };
-        // The original workspace factory could turn an authenticated hosted
-        // session into image/video/search/deploy clients.  Those are XAI-only
-        // capabilities, so a clean production build must never construct
-        // them, even when stale credentials or endpoint configuration are
-        // supplied by an embedding application.  Keep the old constructor
-        // available to unit tests as a compatibility fixture.
+            } else {
+                WebSearchConfig::default()
+            };
+        // The production workspace does not construct hosted media/deploy
+        // clients. Keep search disabled outside the compatibility test graph.
         if !cfg!(test) {
-            image_gen_config = ImageGenConfig::default();
-            video_gen_config = VideoGenConfig::default();
             web_search_config = WebSearchConfig::default();
-            app_builder_deployer_config = AppBuilderDeployerConfig::default();
         }
         xai_grok_tools::registry::types::SessionContext {
             backend,
@@ -492,9 +399,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
             web_search_config,
             web_fetch_config: build_web_fetch_config(),
             lsp: None,
-            image_gen_config,
-            video_gen_config,
-            app_builder_deployer_config,
+            app_builder_deployer_config: AppBuilderDeployerConfig::default(),
             api_key_provider: None,
             auth_provider: self.auth.clone(),
             attribution_callback: None,
@@ -626,8 +531,6 @@ pub mod test_support {
                 web_search_config: Default::default(),
                 web_fetch_config: Default::default(),
                 lsp: None,
-                image_gen_config: Default::default(),
-                video_gen_config: Default::default(),
                 app_builder_deployer_config: Default::default(),
                 api_key_provider: None,
                 auth_provider: None,
@@ -849,13 +752,7 @@ mod tests {
             behavior_preset: None,
         };
         let mcp_edit = test_support::tc("mcp.editor", Some(ToolKind::Edit));
-        let filtered = merge_and_filter(
-            &baseline,
-            &[mcp_edit],
-            &[],
-            CapabilityMode::ReadOnly,
-            "test",
-        );
+        let filtered = merge_and_filter(&baseline, &[mcp_edit], CapabilityMode::ReadOnly, "test");
         assert!(!filtered.tools.iter().any(|t| t.id == "mcp.editor"));
     }
     #[tokio::test]
@@ -869,13 +766,7 @@ mod tests {
             behavior_preset: None,
         };
         let mcp = vec![test_support::tc("mcp.opaque", None)];
-        let filtered = merge_and_filter(
-            &baseline,
-            &mcp,
-            &[],
-            CapabilityMode::ReadOnly,
-            "test_session",
-        );
+        let filtered = merge_and_filter(&baseline, &mcp, CapabilityMode::ReadOnly, "test_session");
         let kept_ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
         assert!(
             kept_ids.contains(&"baseline.opaque"),
@@ -898,7 +789,7 @@ mod tests {
             behavior_preset: None,
         };
         let mcp = vec![test_support::tc("mcp.opaque", None)];
-        let filtered = merge_and_filter(&baseline, &mcp, &[], CapabilityMode::All, "test_session");
+        let filtered = merge_and_filter(&baseline, &mcp, CapabilityMode::All, "test_session");
         let kept_ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
         assert!(
             kept_ids.contains(&"mcp.opaque"),
@@ -916,13 +807,7 @@ mod tests {
         let mut mcp_b = test_support::tc("mcp.tool_b", Some(ToolKind::Read));
         mcp_b.name_override = Some("shared_name".into());
         let mcp = vec![mcp_a, mcp_b];
-        let filtered = merge_and_filter(
-            &baseline,
-            &mcp,
-            &[],
-            CapabilityMode::ReadOnly,
-            "test_session",
-        );
+        let filtered = merge_and_filter(&baseline, &mcp, CapabilityMode::ReadOnly, "test_session");
         let ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
         assert!(ids.contains(&"mcp.tool_a"), "first wins: {ids:?}");
         assert!(
@@ -931,97 +816,10 @@ mod tests {
         );
     }
     #[test]
-    fn hub_tool_merged_into_empty_baseline() {
-        let baseline = ToolServerConfig {
-            tools: vec![],
-            behavior_preset: None,
-        };
-        let hub = vec![test_support::tc("hub:remote_exec", None)];
-        let filtered = merge_and_filter(&baseline, &[], &hub, CapabilityMode::All, "test");
-        let ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(
-            ids.contains(&"hub:remote_exec"),
-            "remote tool should appear under All mode: {ids:?}"
-        );
-    }
-    #[test]
-    fn hub_tool_dropped_under_readonly_because_kind_none() {
-        let baseline = ToolServerConfig {
-            tools: vec![test_support::tc(
-                "GrokBuild:read_file",
-                Some(ToolKind::Read),
-            )],
-            behavior_preset: None,
-        };
-        let hub = vec![test_support::tc("hub:remote_exec", None)];
-        let filtered = merge_and_filter(&baseline, &[], &hub, CapabilityMode::ReadOnly, "test");
-        let ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(
-            !ids.contains(&"hub:remote_exec"),
-            "hub kind: None MUST be dropped under ReadOnly: {ids:?}"
-        );
-    }
-    #[test]
-    fn hub_tool_dedup_baseline_wins() {
-        let baseline = ToolServerConfig {
-            tools: vec![test_support::tc("hub:read_file", Some(ToolKind::Read))],
-            behavior_preset: None,
-        };
-        let hub = vec![test_support::tc("hub:read_file", None)];
-        let filtered = merge_and_filter(&baseline, &[], &hub, CapabilityMode::All, "test");
-        let count = filtered
-            .tools
-            .iter()
-            .filter(|t| t.id == "hub:read_file")
-            .count();
-        assert_eq!(count, 1, "duplicate should be deduped");
-    }
-    #[test]
-    fn hub_tool_dedup_mcp_wins_over_hub() {
-        let baseline = ToolServerConfig {
-            tools: vec![],
-            behavior_preset: None,
-        };
-        let mcp = vec![test_support::tc("hub:shared_tool", Some(ToolKind::Read))];
-        let hub = vec![test_support::tc("hub:shared_tool", None)];
-        let filtered = merge_and_filter(&baseline, &mcp, &hub, CapabilityMode::All, "test");
-        let count = filtered
-            .tools
-            .iter()
-            .filter(|t| t.id == "hub:shared_tool")
-            .count();
-        assert_eq!(count, 1, "MCP wins; hub duplicate skipped");
-        let tool = filtered
-            .tools
-            .iter()
-            .find(|t| t.id == "hub:shared_tool")
-            .unwrap();
-        assert_eq!(tool.kind, Some(ToolKind::Read));
-    }
-    #[test]
-    fn hub_tool_name_collision_with_baseline_skipped() {
-        let baseline = ToolServerConfig {
-            tools: vec![test_support::tc(
-                "GrokBuild:read_file",
-                Some(ToolKind::Read),
-            )],
-            behavior_preset: None,
-        };
-        let mut hub_tool = test_support::tc("hub:read_file_v2", None);
-        hub_tool.name_override = Some("read_file".into());
-        let hub = vec![hub_tool];
-        let filtered = merge_and_filter(&baseline, &[], &hub, CapabilityMode::All, "test");
-        let ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(
-            !ids.contains(&"hub:read_file_v2"),
-            "remote tool with colliding client name must be skipped: {ids:?}"
-        );
-    }
-    #[test]
-    fn empty_hub_snapshot_is_noop() {
+    fn empty_mcp_snapshot_is_noop() {
         let baseline = test_support::baseline_config();
         let baseline_ids: Vec<String> = baseline.tools.iter().map(|t| t.id.clone()).collect();
-        let filtered = merge_and_filter(&baseline, &[], &[], CapabilityMode::ReadWrite, "test");
+        let filtered = merge_and_filter(&baseline, &[], CapabilityMode::ReadWrite, "test");
         let filtered_ids: Vec<String> = filtered.tools.iter().map(|t| t.id.clone()).collect();
         assert_eq!(filtered_ids, baseline_ids);
     }

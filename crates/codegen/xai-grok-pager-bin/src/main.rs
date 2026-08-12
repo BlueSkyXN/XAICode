@@ -100,11 +100,10 @@ fn print_serve_startup_info(bind_addr: SocketAddr, secret: &str) {
 /// Entrypoint tag for `xaicode -p`; keys the quiet stderr default in
 /// `init_tracing_simple`.
 const HEADLESS_ENTRYPOINT: &str = "headless";
-/// Initialize local-only tracing for non-TUI agent modes.
+/// Initialize local tracing for non-TUI agent modes.
 ///
-/// This deliberately installs only a formatter.  The original composition
-/// root added product sampling, OpenTelemetry exporters, Sentry and a remote
-/// debug firehose here; a clean XAICode must never create those clients.
+/// Generic customer OTLP is initialized separately and remains default-off
+/// behind its explicit local double opt-in.
 fn init_tracing_simple(app_entrypoint: &'static str) {
     use tracing_subscriber::{EnvFilter, Layer as _, fmt, layer::SubscriberExt as _};
     let default_filter = if app_entrypoint == HEADLESS_ENTRYPOINT {
@@ -660,8 +659,7 @@ async fn replay_acp_state_after_reconnect(
 /// The TUI has its own signal handler (`app::signal_handler`) that does the
 /// full crossterm teardown.
 fn shutdown_cleanly(exit_code: i32) -> ! {
-    // No network observability or product event queue exists in the clean
-    // build, so shutdown is just process termination.
+    xai_grok_telemetry::external::shutdown();
     std::process::exit(exit_code);
 }
 async fn forward_stdio_line_to_leader(
@@ -722,12 +720,6 @@ async fn run_agent_command(
             }
         }
     });
-    if matches!(
-        agent_args.mode,
-        Some(AgentCmd::Leader(_) | AgentCmd::Stdio | AgentCmd::Headless(_) | AgentCmd::Serve(_))
-    ) {
-        xai_grok_shell::agent::app::suppress_otel();
-    }
     init_tracing_simple("agent");
     if trust {
         match std::env::current_dir() {
@@ -754,6 +746,15 @@ async fn run_agent_command(
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
     let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
+    xai_grok_telemetry::external::init(
+        xai_grok_shell::agent::config::resolve_external_otel_config(
+            xai_grok_telemetry::external::config::ExternalClientInfo {
+                service_version: env!("VERSION_WITH_COMMIT").to_owned(),
+                client_version: xai_grok_version::VERSION.to_owned(),
+                app_entrypoint: "agent".to_owned(),
+            },
+        ),
+    );
     agent_config.default_model_override = agent_args.model.clone();
     agent_config.reasoning_effort_override = agent_args
         .reasoning_effort
@@ -819,188 +820,6 @@ async fn run_agent_command(
     );
     if let Some(profile) = disabled_by_confinement {
         warn_leader_disabled_by_sandbox(profile);
-    }
-    #[cfg(any())]
-    if use_leader {
-        if !agent_args.plugin_dirs.is_empty() {
-            eprintln!("{PLUGIN_DIR_LEADER_WARNING}");
-        }
-        use std::sync::Arc;
-        use tokio::io::AsyncWriteExt;
-        use tokio::sync::Mutex as TokioMutex;
-        use xai_grok_shell::leader::{
-            ClientCapabilities, ClientMode, LeaderReconnector, ReconnectPolicy, connect_or_spawn,
-        };
-        let mode = match &agent_args.mode {
-            Some(AgentCmd::Stdio) => ClientMode::Stdio,
-            Some(AgentCmd::Headless(_)) | None => ClientMode::Headless,
-            _ => ClientMode::Stdio,
-        };
-        let env_urls = xai_grok_shell::leader::LeaderEnvUrls::from(&agent_config.grok_com_config);
-        let default_model = agent_config
-            .default_model_override
-            .clone()
-            .or(agent_config.models.default.clone());
-        let client_type = std::env::args().collect::<Vec<_>>().join(" ");
-        let capabilities = ClientCapabilities {
-            yolo_mode: launch_yolo.yolo,
-            auto_mode: agent_config.default_auto_mode && !launch_yolo.yolo,
-            default_model,
-            client_version: Some(PAGER_CLIENT_VERSION.to_string()),
-            code_nav_enabled: false,
-            terminal: false,
-            fs_read: false,
-            fs_write: false,
-        };
-        let conn = connect_or_spawn(&client_type, mode, &env_urls, capabilities.clone()).await?;
-        let (tx, rx) = conn.into_channels();
-        let (status_tx, _status_rx) = LeaderReconnector::status_channel();
-        let reconnector = LeaderReconnector::new(
-            &client_type,
-            mode,
-            env_urls.clone(),
-            capabilities,
-            status_tx,
-        );
-        let cancel = CancellationToken::new();
-        match mode {
-            ClientMode::Stdio => {
-                if let Err(error) = xai_tty_utils::kill_current_process_on_parent_death() {
-                    tracing::warn!(
-                        %error,
-                        "failed to bind to parent death; stdio bridge will not die \
-                         with its parent — stdin EOF remains the only cleanup"
-                    );
-                }
-                let replay_state = Arc::new(std::sync::Mutex::new(StdioReplayState::default()));
-                let leader_tx = Arc::new(TokioMutex::new(tx));
-                let leader_tx_stdin = leader_tx.clone();
-                let replay_state_stdin = replay_state.clone();
-                let cancel_stdin = cancel.clone();
-                let stdin_task = tokio::spawn(async move {
-                    let mut stdin_lines = xai_acp_lib::spawn_stdin_line_reader();
-                    loop {
-                        tokio::select! {
-                            biased;
-                            _ = cancel_stdin.cancelled() => break,
-                            maybe_line = stdin_lines.recv() => {
-                                let Some(line) = maybe_line else { break };
-                                forward_stdio_line_to_leader(
-                                    line,
-                                    &leader_tx_stdin,
-                                    &replay_state_stdin,
-                                    &cancel_stdin,
-                                )
-                                .await;
-                            }
-                        }
-                    }
-                });
-                let cancel_stdout = cancel.clone();
-                let stdout_task = tokio::spawn(async move {
-                    let mut stdout = tokio::io::stdout();
-                    let mut rx = rx;
-                    loop {
-                        match rx.recv().await {
-                            Some(ref msg) => {
-                                if msg.contains("\"sessionId\"") || msg.contains("\"session_id\"") {
-                                    cache_incoming_session_id(msg, &replay_state);
-                                }
-                                if stdout.write_all(msg.as_bytes()).await.is_err()
-                                    || stdout.write_all(b"\n").await.is_err()
-                                    || stdout.flush().await.is_err()
-                                {
-                                    break;
-                                }
-                            }
-                            None => {
-                                tracing::warn!(
-                                    "Leader disconnected (stdio), attempting reconnect..."
-                                );
-                                match reconnector
-                                    .reconnect(ReconnectPolicy::bounded(), &cancel_stdout)
-                                    .await
-                                {
-                                    Ok((new_tx, mut new_rx, _disconnect_rx)) => {
-                                        tracing::info!("Reconnected to leader (stdio)");
-                                        let replayed_session_id = {
-                                            let mut tx_guard = leader_tx.lock().await;
-                                            *tx_guard = new_tx;
-                                            let state = replay_state
-                                                .lock()
-                                                .unwrap_or_else(|e| e.into_inner())
-                                                .clone();
-                                            replay_acp_state_after_reconnect(
-                                                &tx_guard,
-                                                &mut new_rx,
-                                                &mut stdout,
-                                                &state,
-                                            )
-                                            .await
-                                        };
-                                        rx = new_rx;
-                                        reconnector.notify_connected();
-                                        let params = match replayed_session_id {
-                                            Some(ref sid) => {
-                                                serde_json::json!({ "sessionId": sid }).to_string()
-                                            }
-                                            None => "{}".to_string(),
-                                        };
-                                        let notification = format!(
-                                            r#"{{"jsonrpc":"2.0","method":"x.ai/leader_reconnected","params":{params}}}"#
-                                        );
-                                        let _ = stdout.write_all(notification.as_bytes()).await;
-                                        let _ = stdout.write_all(b"\n").await;
-                                        let _ = stdout.flush().await;
-                                        continue;
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(error = %e, "Failed to reconnect (stdio)");
-                                        cancel_stdout.cancel();
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-                tokio::select! {
-                    _ = stdin_task => {}
-                    _ = stdout_task => {}
-                }
-                return Ok(());
-            }
-            ClientMode::Headless => {
-                drop(tx);
-                let mut rx = rx;
-                loop {
-                    match rx.recv().await {
-                        Some(_) => continue,
-                        None => {
-                            tracing::warn!(
-                                "Leader disconnected (headless), attempting reconnect..."
-                            );
-                            match reconnector
-                                .reconnect(ReconnectPolicy::bounded(), &cancel)
-                                .await
-                            {
-                                Ok((_new_tx, new_rx, _disconnect_rx)) => {
-                                    tracing::info!("Reconnected to leader (headless)");
-                                    rx = new_rx;
-                                    reconnector.notify_connected();
-                                    continue;
-                                }
-                                Err(e) => {
-                                    tracing::error!(error = %e, "Failed to reconnect (headless)");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                return Ok(());
-            }
-        }
     }
     match agent_args.mode {
         Some(AgentCmd::Stdio) => run_stdio_agent(&agent_config, None, agent_memory_config).await,
@@ -1199,6 +1018,7 @@ fn run_and_shutdown<F: std::future::Future>(
 ) -> F::Output {
     let output = runtime.block_on(fut);
     runtime.shutdown_timeout(grace);
+    xai_grok_telemetry::external::shutdown();
     output
 }
 /// Return freed-but-retained jemalloc pages to the OS.
@@ -1372,7 +1192,7 @@ fn main() {
     install_heap_profile_hooks();
     xai_grok_pager::memory_trace::start(xai_grok_pager::memory_trace::default_dir());
     raise_fd_limit();
-    // The clean build has no managed-version gate, Sentry client, or remote
+    // The clean build has no managed-version gate, hosted error reporter, or remote
     // crash/error reporting. Local terminal restoration remains enabled.
     xai_grok_pager::docs::extract_user_guide_docs(&xai_grok_shell::util::grok_home::grok_home());
     xai_crash_handler::install_terminal_restore_only();
@@ -1426,11 +1246,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     }
     if let Some(ref detail) = args.compaction_detail {
         unsafe { std::env::set_var("GROK_COMPACTION_DETAIL", detail) };
-    }
-    if args.chat() {
-        unsafe {
-            std::env::set_var(xai_grok_shell::agent::chat_modes::GROK_CHAT_MODE_ENV, "1");
-        }
     }
     if let Some(ref socket) = args.leader_socket {
         unsafe { std::env::set_var(xai_grok_shell::leader::LEADER_SOCKET_ENV, socket) };
@@ -1967,53 +1782,6 @@ mod tests {
             std::env::var("GROK_OPEN_DASHBOARD_AT_STARTUP").is_err(),
             "failure path must not flag the startup hook",
         );
-    }
-    #[cfg(any())]
-    #[test]
-    fn workspace_command_gate_resolution() {
-        use xai_grok_shell::util::config::RemoteSettings;
-        let on = RemoteSettings {
-            workspace_command_enabled: Some(true),
-            ..RemoteSettings::default()
-        };
-        let off = RemoteSettings::default();
-        assert_eq!(
-            workspace_command_gate(None, Some(&on)),
-            WorkspaceGate::Enabled
-        );
-        assert_eq!(
-            workspace_command_gate(None, Some(&off)),
-            WorkspaceGate::Disabled
-        );
-        assert_eq!(workspace_command_gate(None, None), WorkspaceGate::Unknown);
-        assert_eq!(
-            workspace_command_gate(Some(true), Some(&off)),
-            WorkspaceGate::Enabled
-        );
-        assert_eq!(
-            workspace_command_gate(Some(true), None),
-            WorkspaceGate::Enabled
-        );
-        assert_eq!(
-            workspace_command_gate(Some(false), Some(&on)),
-            WorkspaceGate::Disabled
-        );
-        assert_eq!(
-            workspace_command_gate(Some(false), None),
-            WorkspaceGate::Disabled
-        );
-    }
-    #[cfg(any())]
-    #[serial_test::serial(GROK_WORKSPACE_COMMAND)]
-    #[test]
-    fn workspace_command_env_override_parsing() {
-        unsafe { std::env::remove_var("GROK_WORKSPACE_COMMAND") };
-        assert_eq!(workspace_command_env_override(), None);
-        unsafe { std::env::set_var("GROK_WORKSPACE_COMMAND", "1") };
-        assert_eq!(workspace_command_env_override(), Some(true));
-        unsafe { std::env::set_var("GROK_WORKSPACE_COMMAND", "off") };
-        assert_eq!(workspace_command_env_override(), Some(false));
-        unsafe { std::env::remove_var("GROK_WORKSPACE_COMMAND") };
     }
     fn make_state() -> std::sync::Mutex<StdioReplayState> {
         std::sync::Mutex::new(StdioReplayState::default())

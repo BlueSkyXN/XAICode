@@ -7,9 +7,7 @@ use crate::app::agent_view::{AgentView, PromptInputMode};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{SessionEvent, ToolCallBlock};
-use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
 use std::sync::atomic::{AtomicU64, Ordering};
-use xai_grok_tools::implementations::grok_build::ask_user_question::Question;
 
 /// Monotonic counter for correlating async rewrite responses with the modal
 /// that requested them. Prevents stale results from populating a different
@@ -23,82 +21,10 @@ fn next_rewrite_nonce() -> u64 {
 /// Bare `/feedback` pane label (first paragraph of the question chrome).
 pub(crate) const FEEDBACK_QUESTION_LABEL: &str = "How can we improve Grok Build?";
 
-/// Shared by the pane guard and the send path so both say the same thing.
-const NO_SESSION_NOTICE: &str = "No active session";
-
-/// Minimal mode has no toast surface, so the notice goes to the transcript instead.
-fn feedback_notice(app: &mut AppView, message: &str) {
-    if app.screen_mode.is_minimal() {
-        with_active_agent(app, |agent| {
-            agent
-                .scrollback
-                .push_block(RenderBlock::system(message.to_string()));
-        });
-    } else {
-        app.show_toast(message);
-    }
-}
-
-/// Why the bare `/feedback` pane refuses to open, if anything blocks it.
-fn feedback_pane_blocked(agent: &AgentView) -> Option<&'static str> {
-    if agent.active_subagent.is_some() {
-        // A fullscreen subagent view hides the prompt, so the pane would have nowhere to draw while still swallowing every key.
-        Some("Close the subagent view before sending feedback")
-    } else if agent.question_view.is_some() {
-        Some("Finish answering the current question first")
-    } else if !agent.no_input_overlay_pending()
-        || agent.key_owner() != crate::app::agent_view::KeyOwner::Pane
-    {
-        // Two ways the pane cannot work here. A permission or plan approval holds the composer, even parked in the scrollback, so the
-        // pane would hand it the wrong draft on the way out. A viewer outranks every card for keys, so the box would be untypeable.
-        Some("Close or answer what's open before sending feedback")
-    } else if agent.session.session_id.is_none() {
-        Some(NO_SESSION_NOTICE)
-    } else {
-        None
-    }
-}
-
-/// Open the freeform report pane for bare `/feedback`. Inline text never uses this.
-pub(super) fn dispatch_open_feedback_pane(app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-
-    let blocked = {
-        let Some(agent) = app.agents.get(&id) else {
-            return vec![];
-        };
-        feedback_pane_blocked(agent)
-    };
-    if let Some(message) = blocked {
-        feedback_notice(app, message);
-        return vec![];
-    }
-
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
-    };
-    let question = Question {
-        question: FEEDBACK_QUESTION_LABEL.to_string(),
-        options: vec![],
-        multi_select: Some(false),
-        id: None,
-    };
-    let stashed = agent.prompt.stash();
-    let mut state = QuestionViewState::new(
-        format!("feedback-{}", uuid::Uuid::new_v4()),
-        vec![question],
-        stashed,
-    )
-    .with_local_kind(LocalQuestionKind::Feedback);
-    // Freeform-only: start typing immediately.
-    let freeform = state.activate_freeform_input();
-    agent.prompt.set_text_preserving(&freeform);
-    agent.question_view = Some(state);
+/// Hosted feedback is not available in the local build.
+pub(super) fn dispatch_open_feedback_pane(_app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
-
 /// Enter remember mode: visual change to prompt bar (remember accent, `#` prefix).
 /// No side effects — the user types a memory note and presses Enter to send.
 pub(super) fn dispatch_enter_remember_mode(app: &mut AppView) -> Vec<Effect> {
@@ -131,9 +57,8 @@ pub(super) fn dispatch_send_feedback(app: &mut AppView, text: String) -> Vec<Eff
     agent.scrollback.push_block(RenderBlock::system(
         "Feedback collection is unavailable in the clean local build.".to_string(),
     ));
-    // The upstream action posted to the hosted `x.ai/feedback` extension.
     // Keep the input/dispatch surface for compatibility, but never enqueue a
-    // request or send the user's text outside the local process.
+    // hosted request or send the user's text outside the local process.
     let _ = (id, trimmed);
     vec![]
 }
@@ -338,55 +263,10 @@ fn extract_session_context(agent: &AgentView) -> String {
     parts.join("\n")
 }
 
-/// Send a /btw side question. Bypasses the prompt queue — works even while
-/// the agent is mid-turn. Fires an ACP ext method and shows a loading overlay.
-pub(super) fn dispatch_send_btw(app: &mut AppView, question: String) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    let minimal = app.screen_mode.is_minimal();
-    let (session_id, minimal_request_id) = {
-        let Some(agent) = app.agents.get_mut(&id) else {
-            return vec![];
-        };
-        let Some(session_id) = agent.session.session_id.clone() else {
-            if minimal {
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(
-                        "No active session",
-                    ));
-            } else {
-                agent.show_toast("No active session");
-            }
-            return vec![];
-        };
-
-        agent.prompt.set_text("");
-        let minimal_request_id = if minimal {
-            Some(crate::minimal_api::start_minimal_btw(
-                agent,
-                question.clone(),
-            ))
-        } else {
-            agent.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::Loading {
-                question: question.clone(),
-            });
-            // Prompt keeps focus while the answer is in flight (panel focuses on Done).
-            agent.btw_focused = false;
-            None
-        };
-        (session_id, minimal_request_id)
-    };
-
-    vec![Effect::SendBtw {
-        agent_id: id,
-        session_id,
-        question,
-        minimal_request_id,
-    }]
+/// Side-question ACP dispatch was hosted-only and is absent locally.
+pub(super) fn dispatch_send_btw(_app: &mut AppView, _question: String) -> Vec<Effect> {
+    vec![]
 }
-
 /// Toast when a manual `/recap` produces no summary. Empty sessions get a clear
 /// empty-state message; anything else (model failure, empty summary, etc.) keeps
 /// the generic failure toast.

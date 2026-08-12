@@ -42,8 +42,8 @@ pub struct SpawnedAgent {
     pub thread_handle: thread::JoinHandle<Result<()>>,
     pub channel: AcpClientChannel,
     pub cancel: CancellationToken,
-    /// The agent's `AuthManager`, shared so pager-side consumers (e.g. the voice
-    /// channel) resolve the same refreshing bearer as chat traffic.
+    /// The agent's `AuthManager`, shared so pager-side consumers resolve the
+    /// same refreshing bearer as chat traffic.
     pub auth_manager: std::sync::Arc<AuthManager>,
 }
 
@@ -191,7 +191,7 @@ pub async fn spawn_grok_shell(
     let (acp_client, acp_agent) = acp_channels();
 
     // Clone before `auth_manager` is moved into the agent closure below, so the
-    // pager (voice channel) can share the same refreshing bearer.
+    // pager channels can share the same refreshing bearer.
     let auth_manager_for_pager = auth_manager.clone();
 
     let skills_paths = agent_config.skills.paths.clone();

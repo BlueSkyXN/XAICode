@@ -658,45 +658,6 @@ pub(super) fn default_actions(
                 "Sends a message to the agent mid-turn without cancelling it (interject), so you can steer or add context while it keeps working.\nPlain Enter while a turn is running queues a follow-up for later; this chord merges composer text into the current turn instead.\nWith an empty composer, bare Enter (or this chord) force-sends the top queued follow-up from the prompt — no need to focus the queue pane. On the queue pane, this chord force-sends the selected row.\nReach for it to correct course without losing the turn's progress.",
             ),
         },
-        ActionDef {
-            id: ActionId::EnableVoiceMode,
-            label: "voice mode",
-            description: "Start voice dictation (Ctrl+Space / F8)",
-            // No key binding (`KeyCode::Null`): dispatched directly by the voice
-            // chord's hold-to-talk press in the event loop, not via the registry.
-            default_key: key!(Null),
-            alt_keys: vec![],
-            category: Category::Input,
-            context: When::AgentScreen,
-            hint_priority: None,
-            hint_key_display: None,
-            requires_confirmation: false,
-            long_help: None,
-        },
-        ActionDef {
-            // Voice capture chord (same surface as `/voice`; Esc/Enter stop).
-            // Bound to BOTH Ctrl+Space and F8 — Ctrl+Space decodes on every
-            // terminal (without the Kitty protocol it collapses to NUL, reported
-            // as `Char(' ')`+CONTROL), and F8 is a fallback for OSes/terminals
-            // that intercept Ctrl+Space (e.g. macOS input-source switching; use
-            // Fn+F8 on a laptop). The event loop maps a press to hold-to-talk or
-            // tap-toggle per `[ui].voice_capture_mode` before normal routing.
-            id: ActionId::VoiceToggle,
-            label: "mic",
-            description: "Voice dictation (Ctrl+Space / F8)",
-            default_key: key!(' ', CONTROL),
-            alt_keys: vec![key!(F(8))],
-            category: Category::Input,
-            // `Always` so the toggle key works on the agent screen AND the
-            // session-less dashboard (resolved via the global fallthrough).
-            context: When::Always,
-            hint_priority: Some(11),
-            hint_key_display: Some("Ctrl+Space / F8"),
-            requires_confirmation: false,
-            long_help: Some(
-                "Microphone capture for dictation, bound to Ctrl+Space (or F8 — handy where Ctrl+Space is taken, e.g. macOS input-source switching; use Fn+F8 on a laptop).\nBehavior follows the Voice capture setting: toggle (press to start, press again to stop) or hold-to-talk (hold to record, release to stop), where hold needs a Kitty-protocol terminal and falls back to toggle elsewhere. `/voice` toggles everywhere.\nSpeech is transcribed straight into the prompt.",
-            ),
-        },
         // Prompt history has no key chord (Ctrl+R is deliberately unbound):
         // `/history` opens the search panel; Up on an empty prompt browses.
         ActionDef {

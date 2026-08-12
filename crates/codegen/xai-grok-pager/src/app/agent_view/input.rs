@@ -184,9 +184,8 @@ impl AgentView {
     /// latent composer mode) would steal the press. Conservative on purpose:
     /// when false, the registry `Ctrl+C` is shown, which always cancels.
     /// `esc_owned_before_agent` is the app-level ownership snapshot
-    /// (`AppView::esc_owned_before_agent`: voice dictation listening or
-    /// pending cold-start, a focused dev tracing pane, the top-level cloud /
-    /// import-Claude modals, and the dashboard's attached-agent popup — all
+    /// (`AppView::esc_owned_before_agent`: a focused dev tracing pane, the
+    /// top-level cloud / import-Claude modals, and the dashboard's attached-agent popup — all
     /// consume Esc before any agent routing), passed down by the draw path.
     pub(crate) fn esc_would_cancel_turn(&self, esc_owned_before_agent: bool) -> bool {
         if esc_owned_before_agent
@@ -676,12 +675,6 @@ impl AgentView {
             };
         }
         if self.line_viewer.is_some() {
-            if let Event::Mouse(mouse) = ev
-                && mouse.kind == MouseEventKind::Down(MouseButton::Left)
-                && self.hit_voice_stop_button.contains(mouse.column, mouse.row)
-            {
-                return InputOutcome::Action(Action::VoiceToggle);
-            }
             let plan_prompt_focused = self
                 .plan_approval_view
                 .as_ref()
@@ -928,9 +921,6 @@ impl AgentView {
                             changed |= self.hit_credits.update_hover(mouse.column, mouse.row);
                         }
                         MouseEventKind::Down(MouseButton::Left) => {
-                            if self.hit_voice_stop_button.contains(mouse.column, mouse.row) {
-                                return InputOutcome::Action(Action::VoiceToggle);
-                            }
                             if self.hit_plan_button.contains(mouse.column, mouse.row) {
                                 self.reopen_plan_approval();
                                 return InputOutcome::Changed;
@@ -1330,13 +1320,7 @@ impl AgentView {
                 InputOutcome::Unchanged
             }
             ActionId::ToggleYolo => {
-                if self.pinned_upgrade_cta_live {
-                    InputOutcome::Action(Action::AnnouncementsOpenCta(
-                        xai_grok_telemetry::events::AnnouncementCtaSurface::Keyboard,
-                    ))
-                } else {
-                    InputOutcome::Action(Action::SetYoloMode(!self.session.is_yolo()))
-                }
+                InputOutcome::Action(Action::SetYoloMode(!self.session.is_yolo()))
             }
             ActionId::SendToBackground => {
                 if !self.is_subagent_view
@@ -2475,54 +2459,6 @@ mod plan_approval_model_handoff_tests {
         agent.handle_input(&Event::Key(key!(Esc).to_key_event()), &reg);
         assert!(agent.active_modal.is_none());
         assert!(agent.plan_approval_view.is_some());
-    }
-}
-#[cfg(test)]
-mod voice_stop_click_during_plan_review_tests {
-    use super::test_fixtures::{make_agent, make_plan_approval_view_state};
-    use crate::actions::ActionRegistry;
-    use crate::app::actions::Action;
-    use crate::app::app_view::InputOutcome;
-    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-    use ratatui::layout::Rect;
-    fn stop_click(col: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: col,
-            row,
-            modifiers: KeyModifiers::NONE,
-        })
-    }
-    /// Recording-row [stop] click keeps working while the plan approval's
-    /// line-viewer overlay owns mouse routing — the row stays visible (the
-    /// overlay excludes it), so the viewer must not swallow the click.
-    #[test]
-    fn stop_click_dispatches_voice_toggle_under_plan_approval_viewer() {
-        let mut agent = make_agent();
-        agent.plan_approval_view = Some(make_plan_approval_view_state());
-        agent.reopen_plan_approval();
-        assert!(agent.line_viewer.is_some(), "approval must open the viewer");
-        agent.hit_voice_stop_button.rect = Some(Rect::new(90, 30, 6, 1));
-        let outcome = agent.handle_input(&stop_click(91, 30), &ActionRegistry::defaults());
-        assert!(
-            matches!(outcome, InputOutcome::Action(Action::VoiceToggle)),
-            "[stop] click under the plan viewer must dispatch VoiceToggle, got {outcome:?}"
-        );
-    }
-    /// Same intercept on the approval's feedback surface (viewer closed,
-    /// prompt pane focused).
-    #[test]
-    fn stop_click_dispatches_voice_toggle_in_plan_feedback() {
-        let mut agent = make_agent();
-        agent.plan_approval_view = Some(make_plan_approval_view_state());
-        assert!(agent.line_viewer.is_none());
-        agent.set_active_pane(super::AgentPane::Prompt, false);
-        agent.hit_voice_stop_button.rect = Some(Rect::new(90, 30, 6, 1));
-        let outcome = agent.handle_input(&stop_click(91, 30), &ActionRegistry::defaults());
-        assert!(
-            matches!(outcome, InputOutcome::Action(Action::VoiceToggle)),
-            "[stop] click during plan feedback must dispatch VoiceToggle, got {outcome:?}"
-        );
     }
 }
 #[cfg(test)]

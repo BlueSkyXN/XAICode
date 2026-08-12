@@ -246,16 +246,6 @@ fn subagent_inherits_parent_lsp_via_context() {
         );
 }
 #[test]
-fn subagent_inherits_managed_mcp_state_via_context() {
-    let handle = crate::session::managed_mcp::ManagedMcpStateHandle::default();
-    let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.managed_mcp_state = handle.clone();
-    assert!(
-            Arc::ptr_eq(&handle, &ctx.managed_mcp_state),
-            "child should share parent's managed MCP state (Arc identity)"
-        );
-}
-#[test]
 fn no_parent_lsp_means_child_gets_none() {
     let ctx = ctx_with_toggle(HashMap::new());
     assert!(ctx.lsp.is_none());
@@ -356,7 +346,6 @@ fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
         &Some(reservations.clone()),
         Some(&cmd_tx),
         "get_command_or_subagent_output",
-        &None,
     );
     match cmd_rx.try_recv().expect("expected synthetic Prompt") {
         SessionCommand::Prompt { prompt_id, verbatim, .. } => {
@@ -373,7 +362,6 @@ fn inject_subagent_completed_prompt_releases_reservation_when_parent_closed() {
     drop(cmd_rx);
     let reservations = xai_grok_tools::reminders::task_completion::TaskCompletionReservations::default();
     reservations.reserve("sa-closed".into());
-    let (trace_tx, mut trace_rx) = mpsc::unbounded_channel();
     inject_subagent_completed_prompt(
         "sa-closed",
         &SubagentResult {
@@ -386,7 +374,6 @@ fn inject_subagent_completed_prompt_releases_reservation_when_parent_closed() {
         &Some(reservations.clone()),
         Some(&cmd_tx),
         "get_command_or_subagent_output",
-        &Some(trace_tx),
     );
     assert!(
             reservations.contains("sa-closed"),
@@ -394,7 +381,6 @@ fn inject_subagent_completed_prompt_releases_reservation_when_parent_closed() {
         );
     reservations.release("sa-closed");
     assert!(!reservations.contains("sa-closed"));
-    assert!(trace_rx.try_recv().is_err());
 }
 #[test]
 fn initializing_snapshot_is_running() {
@@ -1666,21 +1652,6 @@ fn subagent_keeps_default_flavor_when_parent_model_is_non_strict() {
             "a non-strict parent model must leave subagents on the default harness",
         );
 }
-fn test_gcs_context(ctx: &SubagentSpawnContext) -> GcsUploadContext {
-    GcsUploadContext {
-        bucket_url: None,
-        upload_method: None,
-        model_id: None,
-        cwd: None,
-        isolation_mode: None,
-        capability_mode: None,
-        reasoning_effort: None,
-        role_name: None,
-        parent_prompt_id: None,
-        depth: 0,
-        auth_manager: ctx.auth_manager.clone(),
-    }
-}
 #[tokio::test]
 async fn cancel_pending_shell_child_presents_one_cancelled_finish() {
     let mut ctx = ctx_with_toggle(HashMap::new());
@@ -1698,7 +1669,6 @@ async fn cancel_pending_shell_child_presents_one_cancelled_finish() {
             None,
             false,
             42,
-            &test_gcs_context(&ctx),
         )
         .await;
     assert!(matches!(
@@ -1755,7 +1725,6 @@ async fn run_promote_cancel_with_worktree(
     worktree: &Path,
     worktree_freshly_created: bool,
 ) {
-    let ctx = ctx_with_toggle(HashMap::new());
     let (child_cmd_tx, mut child_cmd_rx) = mpsc::unbounded_channel();
     let meta_dir = tempfile::tempdir().expect("meta dir");
     let result = cancel_pending_shell_child(
@@ -1766,7 +1735,6 @@ async fn run_promote_cancel_with_worktree(
             Some(worktree),
             worktree_freshly_created,
             42,
-            &test_gcs_context(&ctx),
         )
         .await;
     assert!(matches!(

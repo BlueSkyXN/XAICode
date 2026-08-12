@@ -6,9 +6,7 @@
 use super::commands::SessionCommand;
 use super::persistence::{LocalFeedbackEntry, PersistenceMsg};
 use agent_client_protocol as acp;
-use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc, oneshot};
-use xai_file_utils::queue::UploadQueue;
 use xai_grok_sampling_types::ReasoningEffort;
 use xai_hunk_tracker::HunkTrackerHandle;
 /// Coarse lifecycle state of a session as known to the leader/agent.
@@ -97,19 +95,8 @@ pub struct SessionHandle {
     /// in API responses to this path so the client UI shows the original
     /// project path, not the worktree path.
     pub display_cwd: Option<String>,
-    /// Feedback manager for periodic signal sync. Exposed so callers can
-    /// attach GCS upload queue stats for snapshotting into signals.
+    /// Local feedback state manager.
     pub feedback_manager: std::sync::Arc<crate::session::feedback_manager::FeedbackManager>,
-    /// Session-scoped upload queue. Lazily initialized on the first turn that
-    /// enables trace uploads. `Arc<OnceLock<_>>` ensures all `SessionHandle`
-    /// clones share the same underlying queue instance.
-    pub(crate) upload_queue: std::sync::Arc<std::sync::OnceLock<UploadQueue>>,
-    /// Consecutive upload failures with no confirmed upload in between,
-    /// driving this session's upload-failure log suppression. Shared across
-    /// handle clones; per-session so one session's bucket outage cannot mute
-    /// another session's first-failure log (its unified_log artifact must
-    /// carry evidence of its own failures).
-    pub(crate) upload_failures_since_success: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Session context captured at spawn time so callers can inherit shared runtime state.
     pub tool_context: crate::tools::ToolContext,
     /// The model this session was created with (or switched to via setModel).
@@ -142,6 +129,10 @@ pub struct SessionHandle {
     /// (`_meta.askUserQuestion` / `--no-ask-user` and the remote settings / config /
     /// env gate). Stored per-session so subagents inherit it at spawn.
     pub ask_user_question_enabled: bool,
+    /// Whether this session was spawned non-interactive
+    /// (`startupHints.nonInteractive`, e.g. headless `-p` / SDK). Stored
+    /// per-session so subagents inherit it at spawn.
+    pub non_interactive: bool,
     /// Plan mode tracker — shared with the session actor via Arc.
     /// Exposed so the `x.ai/toggle_plan_mode` handler can toggle plan mode
     /// without going through the session command channel.
@@ -161,7 +152,6 @@ pub struct SessionHandle {
     pub attribution_callback: Option<xai_grok_sampler::SharedAttributionCallback>,
     /// The agent definition name for this session.
     pub agent_name: String,
-    pub managed_mcp_proxy_base_url: String,
     pub session_default_agent_profile: Option<String>,
     /// Subagent types this agent can spawn (from Agent(t1, t2) in tools).
     pub allowed_subagent_types: Option<Vec<String>>,
@@ -461,25 +451,6 @@ impl SessionHandle {
         tool_name: String,
         enabled: bool,
     ) -> Result<(), agent_client_protocol::Error> {
-        self.toggle_mcp_tool_with_source(server_name, tool_name, enabled, false)
-            .await
-    }
-    pub(crate) async fn toggle_managed_gateway_tool(
-        &self,
-        server_name: String,
-        tool_name: String,
-        enabled: bool,
-    ) -> Result<(), agent_client_protocol::Error> {
-        self.toggle_mcp_tool_with_source(server_name, tool_name, enabled, true)
-            .await
-    }
-    async fn toggle_mcp_tool_with_source(
-        &self,
-        server_name: String,
-        tool_name: String,
-        enabled: bool,
-        is_managed_gateway: bool,
-    ) -> Result<(), agent_client_protocol::Error> {
         let (tx, rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -487,7 +458,6 @@ impl SessionHandle {
                 server_name,
                 tool_name,
                 enabled,
-                is_managed_gateway,
                 respond_to: tx,
             })
             .is_err()
@@ -496,19 +466,6 @@ impl SessionHandle {
         }
         rx.await
             .map_err(|_| agent_client_protocol::Error::internal_error().data("session closed"))?
-    }
-    pub(crate) async fn managed_gateway_disabled_tool_names(
-        &self,
-    ) -> HashMap<String, HashSet<String>> {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(SessionCommand::GetManagedGatewayDisabledTools { respond_to: tx })
-            .is_err()
-        {
-            return HashMap::new();
-        }
-        rx.await.unwrap_or_default()
     }
     pub(crate) async fn retry_auth_required_servers(&self) {
         let (tx, rx) = oneshot::channel();

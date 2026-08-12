@@ -247,7 +247,6 @@ fn facts(
             keyboard,
             newline,
             clipboard,
-            voice: None,
         },
         clipboard_recovery,
     )

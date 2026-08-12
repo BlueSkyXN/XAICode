@@ -41,7 +41,7 @@ impl TurnBoundary {
             turn_number,
         }
     }
-    /// Turn-hook end (from `on_after_turn`): activity + upload + rootfs snapshot.
+    /// Turn-hook end (from `on_after_turn`): activity + local rootfs snapshot.
     pub(crate) fn turn_end(
         turn_number: u64,
         duration_ms: u64,
@@ -235,11 +235,7 @@ impl WorkspaceHandle {
     /// checkpoint on non-`Completed` turn-ends (gap #2).
     ///
     /// Turn-hook ends return the after-turn enqueue handle for the ack path.
-    pub(crate) async fn on_turn_boundary(
-        &self,
-        session_id: &str,
-        boundary: TurnBoundary,
-    ) -> Option<tokio::task::JoinHandle<xai_file_utils::queue::EnqueueOutcome>> {
+    pub(crate) async fn on_turn_boundary(&self, session_id: &str, boundary: TurnBoundary) {
         match boundary {
             TurnBoundary::Start {
                 prompt_index: Some(idx),
@@ -258,7 +254,6 @@ impl WorkspaceHandle {
                         }
                     }
                 }
-                None
             }
             TurnBoundary::Start {
                 prompt_index: None,
@@ -267,7 +262,6 @@ impl WorkspaceHandle {
                 self.shared
                     .activity_tracker
                     .turn_started(session_id, turn_number);
-                None
             }
             TurnBoundary::End {
                 prompt_index: Some(idx),
@@ -306,7 +300,6 @@ impl WorkspaceHandle {
                         }
                     }
                 }
-                None
             }
             TurnBoundary::End {
                 prompt_index: None,
@@ -318,10 +311,7 @@ impl WorkspaceHandle {
                 self.shared
                     .activity_tracker
                     .turn_completed(session_id, turn_number, duration_ms);
-                let handle = {
-                    let _ = written;
-                    None
-                };
+                let _ = written;
                 if self.shared.workspace_rewind_all_outcomes
                     && outcome != TurnHookOutcome::Completed
                     && let Some(session) = self.session(session_id)
@@ -357,7 +347,6 @@ impl WorkspaceHandle {
                         crate::handle::record_non_completed_finalize_canary(outcome);
                     }
                 }
-                handle
             }
         }
     }

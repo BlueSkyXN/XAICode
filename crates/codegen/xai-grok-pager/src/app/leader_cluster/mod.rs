@@ -92,8 +92,6 @@ struct ClusterClient {
     app: AppView,
     rx: AcpClientRx,
     tasks: JoinSet<TaskResult>,
-    progress_tx: tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
-    _progress_rx: tokio::sync::mpsc::UnboundedReceiver<effects::RestoreProgressMsg>,
     bridge_cancel: CancellationToken,
     /// Present when the client was built with a reconnector: observes
     /// generation bumps after a leader kill/respawn.
@@ -138,7 +136,6 @@ impl ClusterClient {
                 &self.app.acp_tx,
                 &self.app.cwd,
                 &flags,
-                &self.progress_tx,
             );
         }
         self.drain_pending_effects();
@@ -520,13 +517,10 @@ impl PagerLeaderCluster {
         app.trust_state = TrustState::Done;
         app.cwd = self.workdir.path().to_path_buf();
 
-        let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
         ClusterClient {
             app,
             rx,
             tasks: JoinSet::new(),
-            progress_tx,
-            _progress_rx: progress_rx,
             bridge_cancel: cancel,
             status_rx,
         }

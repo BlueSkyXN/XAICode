@@ -190,7 +190,7 @@ mod cli_catchall_drop_tests {
 /// Spawns a session actor and returns the session handle plus a receiver for permission events.
 ///
 /// The permission events receiver should be used to collect telemetry about permission
-/// decisions (YOLO mode, user accept/reject, etc.) for upload to GCS.
+/// decisions (YOLO mode, user accept/reject, etc.) for local session history.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(
     name = "session.spawn",
@@ -260,9 +260,6 @@ pub(crate) async fn spawn_session_actor(
     memory_config: Option<crate::config::MemoryConfig>,
     loc_tracking_enabled: bool,
     feedback_flags: crate::session::feedback_manager::FeedbackFlags,
-    managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
-    managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    managed_mcp_proxy_base_url: String,
     session_model_id: acp::ModelId,
     session_yolo_mode: bool,
     session_auto_mode: bool,
@@ -336,115 +333,92 @@ pub(crate) async fn spawn_session_actor(
     );
     let _ = support_permission;
     let owns_permission_manager = inherited_permission_handle.is_none();
-    let (permissions, permission_events_rx, deny_read_globs) = if let Some(handle) =
-        inherited_permission_handle
-    {
-        let (_dummy_tx, dummy_rx) = mpsc::unbounded_channel::<PermissionEvent>();
-        let deny_read_globs = handle.deny_read_globs();
-        (handle, dummy_rx, deny_read_globs)
-    } else {
-        let web_fetch_allowed_domains = match &web_fetch_config {
-            WebFetchConfig::Enabled { params } => params.allowed_domains(),
-            WebFetchConfig::Disabled => vec![],
-        };
-        let project_trusted =
-            crate::agent::folder_trust::project_scope_allowed(tool_context.cwd.as_path());
-        let mut permission_config =
+    let (permissions, permission_events_rx, deny_read_globs) =
+        if let Some(handle) = inherited_permission_handle {
+            let (_dummy_tx, dummy_rx) = mpsc::unbounded_channel::<PermissionEvent>();
+            let deny_read_globs = handle.deny_read_globs();
+            (handle, dummy_rx, deny_read_globs)
+        } else {
+            let web_fetch_allowed_domains = match &web_fetch_config {
+                WebFetchConfig::Enabled { params } => params.allowed_domains(),
+                WebFetchConfig::Disabled => vec![],
+            };
+            let project_trusted =
+                crate::agent::folder_trust::project_scope_allowed(tool_context.cwd.as_path());
+            let mut permission_config =
             xai_grok_workspace::permission::resolution::resolve_permission_config_with_fallback(
                 tool_context.cwd.as_path(),
                 project_trusted,
             )
             .await;
-        let yolo_pin = xai_grok_workspace::permission::resolution::yolo_disabled_by_policy();
-        let (cli_permission_rules, dropped_catchalls) =
-            drop_cli_catchall_allows(cli_permission_rules, yolo_pin);
-        if let Some(reason) = yolo_pin
-            && !dropped_catchalls.is_empty()
-        {
-            tracing::warn!(
-                reason,
-                dropped = dropped_catchalls.len(),
-                "CLI --allow catch-all ignored: always-approve disabled by managed policy"
-            );
-            if startup_hints.non_interactive {
-                eprintln!("grok: --allow catch-all ignored: {reason}");
-            }
-        }
-        if !cli_permission_rules.is_empty() {
-            match &mut permission_config {
-                Some(config) => {
-                    let mut merged = cli_permission_rules;
-                    merged.append(&mut config.rules);
-                    config.rules = merged;
-                }
-                None => {
-                    permission_config = Some(
-                        xai_grok_workspace::permission::types::PermissionConfig::new(
-                            cli_permission_rules,
-                        ),
-                    );
-                }
-            }
-        }
-        let deny_read_globs = permission_config
-            .as_ref()
-            .map(xai_grok_workspace::permission::resolution::deny_read_globs_from_config)
-            .unwrap_or_default();
-        let hub_permission = if xai_grok_workspace::permission::hitl_permission_live_enabled() {
-            let server = match workspace_ops.workspace_handle() {
-                Some(handle) => handle.hub_server_blocking().await,
-                None => None,
-            };
-            let transport = server
-                .and_then(|server| {
-                    xai_grok_workspace::permission::ToolServerPermissionTransport::from_session_id(
-                        server,
-                        session_info.id.0.as_ref(),
-                    )
-                })
-                .map(|t| {
-                    std::sync::Arc::new(t)
-                        as std::sync::Arc<
-                            dyn xai_grok_workspace::permission::PermissionHookTransport,
-                        >
-                });
-            if transport.is_none() {
-                tracing::debug!(
-                    session_id = %session_info.id.0,
-                    "hitl permission live enabled but no remote transport available; using local prompt"
+            let yolo_pin = xai_grok_workspace::permission::resolution::yolo_disabled_by_policy();
+            let (cli_permission_rules, dropped_catchalls) =
+                drop_cli_catchall_allows(cli_permission_rules, yolo_pin);
+            if let Some(reason) = yolo_pin
+                && !dropped_catchalls.is_empty()
+            {
+                tracing::warn!(
+                    reason,
+                    dropped = dropped_catchalls.len(),
+                    "CLI --allow catch-all ignored: always-approve disabled by managed policy"
                 );
+                if startup_hints.non_interactive {
+                    eprintln!("grok: --allow catch-all ignored: {reason}");
+                }
             }
-            transport
-        } else {
-            None
-        };
-        let (permissions, permission_events_rx) =
-            xai_grok_workspace::permission::spawn_permission_manager_with_hub(
-                session_info.id.clone(),
-                gateway.clone(),
-                tool_context.cwd.clone(),
-                client_type,
-                permission_config,
-                deny_read_globs.clone(),
-                web_fetch_allowed_domains,
+            if !cli_permission_rules.is_empty() {
+                match &mut permission_config {
+                    Some(config) => {
+                        let mut merged = cli_permission_rules;
+                        merged.append(&mut config.rules);
+                        config.rules = merged;
+                    }
+                    None => {
+                        permission_config = Some(
+                            xai_grok_workspace::permission::types::PermissionConfig::new(
+                                cli_permission_rules,
+                            ),
+                        );
+                    }
+                }
+            }
+            let deny_read_globs = permission_config
+                .as_ref()
+                .map(xai_grok_workspace::permission::resolution::deny_read_globs_from_config)
+                .unwrap_or_default();
+            // Permission prompts are local-only in this build.  Keep the optional
+            // transport slot for wire/config compatibility, but never construct a
+            // hosted hub transport here.
+            let hub_permission: Option<
+                std::sync::Arc<dyn xai_grok_workspace::permission::PermissionHookTransport>,
+            > = None;
+            let (permissions, permission_events_rx) =
+                xai_grok_workspace::permission::spawn_permission_manager_with_hub(
+                    session_info.id.clone(),
+                    gateway.clone(),
+                    tool_context.cwd.clone(),
+                    client_type,
+                    permission_config,
+                    deny_read_globs.clone(),
+                    web_fetch_allowed_domains,
+                    session_yolo_mode,
+                    session_client_identifier.clone(),
+                    crate::util::config::remember_tool_approvals_from_disk(),
+                    hub_permission,
+                );
+            if crate::util::config::auto_mode_session_active(
+                crate::util::config::auto_permission_mode_enabled_from_disk(),
+                session_auto_mode,
                 session_yolo_mode,
-                session_client_identifier.clone(),
-                crate::util::config::remember_tool_approvals_from_disk(),
-                hub_permission,
-            );
-        if crate::util::config::auto_mode_session_active(
-            crate::util::config::auto_permission_mode_enabled_from_disk(),
-            session_auto_mode,
-            session_yolo_mode,
-        ) {
-            permissions.set_auto_mode(true);
-            let turns = build_classifier_turns(&conversation, CLASSIFIER_SPAWN_SEED_TURNS);
-            if !turns.is_empty() {
-                permissions.set_classifier_transcript(turns);
+            ) {
+                permissions.set_auto_mode(true);
+                let turns = build_classifier_turns(&conversation, CLASSIFIER_SPAWN_SEED_TURNS);
+                if !turns.is_empty() {
+                    permissions.set_classifier_transcript(turns);
+                }
             }
-        }
-        (permissions, permission_events_rx, deny_read_globs)
-    };
+            (permissions, permission_events_rx, deny_read_globs)
+        };
     let initial_prompt_index = conversation
         .iter()
         .filter(|item| matches!(item, ConversationItem::User(_)))
@@ -596,15 +570,6 @@ pub(crate) async fn spawn_session_actor(
         xai_grok_tools::reminders::task_completion::TaskWakeSuppressed::default();
     tool_context.task_completion_reservations = Some(task_completion_reservations.clone());
     tool_context.task_wake_suppressed = Some(task_wake_suppressed.clone());
-    let synthetic_trace_tx_shared: std::sync::Arc<
-        std::sync::Mutex<
-            Option<
-                tokio::sync::mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>,
-            >,
-        >,
-    > = std::sync::Arc::new(std::sync::Mutex::new(None));
-    *synthetic_trace_tx_shared.lock().unwrap() = tool_context.synthetic_trace_tx.clone();
-    tool_context.synthetic_trace_tx_shared = Some(synthetic_trace_tx_shared.clone());
     let mut tool_context = tool_context.with_file_state_handle(file_state_handle);
     let index_root_for_session =
         xai_grok_workspace::session::git::find_git_root_from_path(tool_context.cwd.as_path())
@@ -655,7 +620,6 @@ pub(crate) async fn spawn_session_actor(
             session_cmd_tx: cmd_tx.clone(),
             task_completion_reservations: task_completion_reservations.clone(),
             task_wake_suppressed: task_wake_suppressed.clone(),
-            synthetic_trace_tx: synthetic_trace_tx_shared.clone(),
             task_output_tool_name: task_output_tool_name.clone(),
             read_tool_name: read_tool_name.clone(),
             auto_wake_enabled: tool_context.auto_wake_enabled,
@@ -902,14 +866,6 @@ pub(crate) async fn spawn_session_actor(
             .as_ref()
             .and_then(|r| r.scheduler_background_loops),
     );
-    let managed_gateway_tool_client = auth_manager.as_ref().map(|am| {
-        xai_grok_tools::types::resources::ManagedGatewayToolClient(Arc::new(
-            ShellManagedGatewayToolClient {
-                proxy_base_url: managed_mcp_proxy_base_url.clone(),
-                auth_manager: am.clone(),
-            },
-        ))
-    });
     let mcp_state = {
         let mut state = McpState::new_with_meta(mcp_servers.clone(), mcp_meta_config_map);
         if let Some(ref pool) = parent_mcp_pool {
@@ -987,7 +943,6 @@ pub(crate) async fn spawn_session_actor(
         path_not_found_hints,
         scheduler_background_loops,
         mcp_state: mcp_state.clone(),
-        managed_gateway_tool_client: managed_gateway_tool_client.clone(),
         is_non_interactive: startup_hints.non_interactive,
         system_prompt_label,
         owner_session_id: Some(session_info.id.0.to_string()),
@@ -1096,6 +1051,7 @@ pub(crate) async fn spawn_session_actor(
     prompt_context.normalize_for_persistence();
     save_prompt_context(&session_info, &prompt_context);
     let is_subagent_spawn = startup_hints.is_subagent;
+    let session_non_interactive = startup_hints.non_interactive;
     install_system_prompt(
         &mut conversation,
         &mut startup_hints.inherited_prefix_len,
@@ -1141,23 +1097,13 @@ pub(crate) async fn spawn_session_actor(
     );
     persist_chat_history_jsonl_sync(&session_info, &conversation);
     chat_state_handle.replace_conversation(conversation);
-    let feedback_client = feedback_proxy_url.map(|base_url| {
-        let mut client =
-            crate::agent::feedback_client::FeedbackClient::new(base_url, feedback_user_token)
-                .with_alpha_test_key(feedback_alpha_test_key)
-                .with_deployment_key(deployment_key);
-        if let Some(am) = auth_manager.as_ref() {
-            client = client.with_auth_manager(am.clone());
-        }
-        client
-    });
-    let has_feedback_client = feedback_client.is_some();
-    tracing::info!(
-        session_id = %session_info.id.0,
-        has_feedback_client = has_feedback_client,
-        "Creating feedback manager"
+    let _ = (
+        feedback_proxy_url,
+        feedback_user_token,
+        feedback_alpha_test_key,
+        deployment_key,
     );
-    let feedback_client_type = match client_type {
+    let feedback_type = match client_type {
         ClientType::GrokTUI => prod_mc_cli_chat_proxy_types::feedback_types::ClientType::Tui,
         ClientType::GrokWeb => prod_mc_cli_chat_proxy_types::feedback_types::ClientType::Web,
         ClientType::Nebula => prod_mc_cli_chat_proxy_types::feedback_types::ClientType::Nebula,
@@ -1172,21 +1118,13 @@ pub(crate) async fn spawn_session_actor(
     let feedback_config = FeedbackManagerConfig {
         feedback_enabled: feedback_flags.enabled,
         telemetry_enabled,
-        client_type: feedback_client_type,
+        client_type: feedback_type,
         loc_tracking_enabled,
         user: user_cfg.clone(),
         ..Default::default()
     };
-    if feedback_flags.enabled
-        && let Some(user_cfg) = user_cfg
-    {
-        tokio::spawn(async move {
-            let _ = crate::util::user_identity::cached_identity(Some(&user_cfg)).await;
-        });
-    }
     let feedback_manager = Arc::new(FeedbackManager::new(
         session_info.id.0.to_string(),
-        feedback_client,
         feedback_config,
     ));
     let signals_handle = feedback_manager.signals_handle();
@@ -1203,11 +1141,7 @@ pub(crate) async fn spawn_session_actor(
     }
     signals_handle.set_primary_model(&primary_model_id);
     signals_handle.set_tracing_config(inference_idle_timeout_secs);
-    let sync_loop_cancel = if has_feedback_client {
-        Some(tokio_util::sync::CancellationToken::new())
-    } else {
-        None
-    };
+    let sync_loop_cancel = None;
     let force_compact = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let resolved_workspace_root = xai_grok_workspace::session::git::find_git_root_from_path(
         std::path::Path::new(&session_info.cwd),
@@ -1281,7 +1215,6 @@ pub(crate) async fn spawn_session_actor(
         .iter()
         .map(|e| e.to_string())
         .collect();
-    let upload_queue = Arc::new(std::sync::OnceLock::new());
     let (goal_update_tx, goal_update_rx) = tokio::sync::mpsc::unbounded_channel::<
         xai_grok_tools::implementations::grok_build::update_goal::UpdateGoalEnvelope,
     >();
@@ -1657,7 +1590,6 @@ pub(crate) async fn spawn_session_actor(
         client_identifier: session_client_identifier.clone(),
         origin_client: origin_client.clone(),
         feedback_manager: feedback_manager.clone(),
-        upload_queue: upload_queue.clone(),
         sync_loop_cancel: sync_loop_cancel.clone(),
         agent: std::cell::RefCell::new(agent),
         last_reported_branch: Arc::new(Mutex::new(None)),
@@ -1711,8 +1643,6 @@ pub(crate) async fn spawn_session_actor(
         goal_plan_reconciled: std::sync::atomic::AtomicBool::new(false),
         pending_classifier_completions: parking_lot::Mutex::new(VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
-        managed_mcp_handle,
-        managed_mcp_expires_at: std::sync::Mutex::new(managed_mcp_expires_at),
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announced_servers: Mutex::new(
             persisted_announcement_state
@@ -1763,7 +1693,6 @@ pub(crate) async fn spawn_session_actor(
         turn_summary_generation: std::cell::Cell::new(0),
         turn_summary_enabled: effective_config.is_turn_summary_enabled(),
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
         sampler_handle,
         rebuild_spec: rebuild_spec.clone(),
@@ -1771,7 +1700,6 @@ pub(crate) async fn spawn_session_actor(
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace_ops.clone(),
-        trace_config_template: std::cell::RefCell::new(None),
     });
     if goal_was_restored {
         let current_tokens = session.chat_state_handle.get_total_tokens().await as i64;
@@ -1823,14 +1751,6 @@ pub(crate) async fn spawn_session_actor(
             .update_resource(xai_grok_tools::types::tool_index::ToolIndex(
                 std::sync::Arc::new(tool_index),
             ))
-            .await;
-    }
-    if let Some(client) = managed_gateway_tool_client.clone() {
-        session
-            .agent
-            .borrow()
-            .tool_bridge()
-            .update_resource(client)
             .await;
     }
     {
@@ -1945,21 +1865,6 @@ pub(crate) async fn spawn_session_actor(
                     .fetch_add(total_added as u64, std::sync::atomic::Ordering::Relaxed);
             }
         });
-    }
-    if let Some(cancel) = sync_loop_cancel {
-        tracing::info!(
-            session_id = %session_info.id.0,
-            "Spawning feedback sync loop"
-        );
-        let fm = feedback_manager.clone();
-        tokio::spawn(async move {
-            fm.run_sync_loop(cancel).await;
-        });
-    } else {
-        tracing::debug!(
-            session_id = %session_info.id.0,
-            "No feedback client available, skipping sync loop"
-        );
     }
     {
         use agent_client_protocol::Client as _;
@@ -2104,8 +2009,6 @@ pub(crate) async fn spawn_session_actor(
             initial_client_mcp_servers,
             display_cwd: None,
             feedback_manager: feedback_manager.clone(),
-            upload_queue: upload_queue.clone(),
-            upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_context: tool_context_for_handle,
             model_id: session_model_id,
             scheduler_background_loops,
@@ -2114,12 +2017,12 @@ pub(crate) async fn spawn_session_actor(
             origin_client: origin_client.clone(),
             code_nav_enabled,
             ask_user_question_enabled,
+            non_interactive: session_non_interactive,
             plan_mode: plan_mode.clone(),
             force_compact,
             permission_handle: permissions_for_handle,
             attribution_callback: attribution_callback_for_handle,
             agent_name: agent_name_for_handle,
-            managed_mcp_proxy_base_url,
             session_default_agent_profile,
             allowed_subagent_types: allowed_subagent_types_for_handle,
             hook_registry: hook_registry_for_handle,
@@ -2221,9 +2124,6 @@ pub(crate) async fn spawn_session_on_thread(
     memory_config: Option<crate::config::MemoryConfig>,
     loc_tracking_enabled: bool,
     feedback_flags: crate::session::feedback_manager::FeedbackFlags,
-    managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
-    managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    managed_mcp_proxy_base_url: String,
     session_model_id: acp::ModelId,
     session_yolo_mode: bool,
     session_auto_mode: bool,
@@ -2396,9 +2296,6 @@ pub(crate) async fn spawn_session_on_thread(
                         memory_config,
                         loc_tracking_enabled,
                         feedback_flags,
-                        managed_mcp_handle,
-                        managed_mcp_expires_at,
-                        managed_mcp_proxy_base_url,
                         session_model_id,
                         session_yolo_mode,
                         session_auto_mode,

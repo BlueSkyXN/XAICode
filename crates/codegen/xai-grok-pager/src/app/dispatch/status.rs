@@ -12,12 +12,6 @@ use crate::app::app_view::{ActiveView, AppView};
 use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
 
-/// Temporary kill switch: client share links are disabled.
-pub(super) fn dispatch_share_session(app: &mut AppView) -> Vec<Effect> {
-    app.show_toast("Session sharing is temporarily disabled");
-    vec![]
-}
-
 /// Monotonic generation for usage-modal fetches. Each open stamps the modal
 /// and its effects with a fresh value so a reply from a previous open (same
 /// session, modal closed and reopened) can't overwrite newer results. `0` is
@@ -66,12 +60,6 @@ pub(super) fn open_usage_info_modal(
         tab,
         UsageInfoContext {
             session_id: session_id.as_ref().map(|s| s.0.to_string()),
-            // The modal retains the upstream shape for compatibility, but
-            // the local product exposes only session/context information.
-            usage_visible: false,
-            chat_kind: agent.chat_kind,
-            billing_redirect_url: None,
-            subscription_tier: None,
         },
     );
     state.fetch_nonce = nonce;
@@ -285,7 +273,7 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
 /// credits. The clean build intentionally keeps only the local request.
 pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
     if !app.screen_mode.is_minimal() {
-        return open_usage_info_modal(app, crate::views::usage_modal::UsageInfoTab::UsageLimit);
+        return open_usage_info_modal(app, crate::views::usage_modal::UsageInfoTab::SessionInfo);
     }
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -355,23 +343,6 @@ pub(super) fn commit_session_usage_block(
         return vec![];
     }
     push_and_page_flip(&mut agent.scrollback, RenderBlock::system(text));
-    vec![]
-}
-
-/// Compatibility shim for stale callers. Hosted consumer billing is removed
-/// from the clean build, so this never emits a network effect or URL.
-pub(super) fn append_consumer_billing_surface(app: &mut AppView, agent_id: AgentId) -> Vec<Effect> {
-    let _ = (app, agent_id);
-    vec![]
-}
-
-/// `/usage manage` — open consumer billing. No-op when the surface is hidden.
-pub(super) fn dispatch_manage_billing(app: &mut AppView) -> Vec<Effect> {
-    let _ = app;
-    // Hosted billing is absent from the local build. Keep this dispatcher as a
-    // compatibility shim for stale actions, but never open a hosted URL or
-    // initiate a remote billing request; local session usage remains available
-    // through `/usage`.
     vec![]
 }
 

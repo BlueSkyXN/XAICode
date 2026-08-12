@@ -40,89 +40,10 @@ pub struct DoomLoopRecovery {
     pub model: String,
 }
 
-#[derive(Serialize)]
-pub struct TraceUploadAttempted {
-    pub session_id: String,
-    pub turn_number: u64,
-    pub upload_method: String,
-}
-
-#[derive(Serialize)]
-pub struct TraceUploadSucceeded {
-    pub session_id: String,
-    pub turn_number: u64,
-    pub upload_method: String,
-    pub fully_uploaded: bool,
-}
-
-#[derive(Serialize)]
-pub struct TraceUploadSkipped {
-    pub session_id: String,
-    pub turn_number: u64,
-    pub reason: String,
-}
-
-#[derive(Serialize)]
-pub struct TraceUploadFailed {
-    pub session_id: String,
-    pub turn_number: u64,
-    pub upload_method: String,
-    pub error_category: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status_code: Option<u16>,
-}
-
-/// Why trace uploads are enabled or disabled for a given prompt.
-/// Recorded on the `agent.prompt` span as `upload_reason` for analytics queries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TraceUploadReason {
-    /// ZDR (zero data retention) team — all uploads disabled.
-    ZdrTeam,
-    /// `[telemetry] trace_upload = false` in config.
-    FeatureOff,
-    /// No grok.com auth or deployment key.
-    NoCredentials,
-    /// Direct-to-bucket S3 upload.
-    DirectS3,
-    /// Proxy mode via grok.com auth.
-    Proxy,
-    /// Direct GCS with service account key.
-    DirectGcs,
-    /// Session handle not found (edge case).
-    SessionNotFound,
-}
-
-impl TraceUploadReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ZdrTeam => "zdr_team",
-            Self::FeatureOff => "feature_off",
-            Self::NoCredentials => "no_credentials",
-            Self::DirectS3 => "direct_s3",
-            Self::Proxy => "proxy",
-            Self::DirectGcs => "direct_gcs",
-            Self::SessionNotFound => "session_not_found",
-        }
-    }
-
-    pub fn from_upload_method(method: &Option<xai_file_utils::UploadMethod>) -> Self {
-        match method {
-            Some(xai_file_utils::UploadMethod::Proxy { .. }) => Self::Proxy,
-            Some(xai_file_utils::UploadMethod::S3 { .. }) => Self::DirectS3,
-            Some(xai_file_utils::UploadMethod::Direct { .. }) => Self::DirectGcs,
-            None => Self::NoCredentials,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use xai_file_utils::UploadMethod;
-
-    use super::TraceUploadReason;
-
-    /// The `grok-shell-doom_loop_recovery` Mixpanel event's name and
-    /// property keys are dashboard contracts — pin them.
+    /// The legacy `grok-shell-doom_loop_recovery` event's name and property
+    /// keys are compatibility contracts — pin them.
     #[test]
     fn doom_loop_recovery_event_shape_is_stable() {
         use crate::events::TelemetryEvent;
@@ -157,57 +78,5 @@ mod tests {
         })
         .unwrap();
         assert!(no_trigger.get("top_trigger").is_none(), "None is omitted");
-    }
-
-    /// `as_str` values are recorded on the `agent.prompt` span as
-    /// `upload_reason` and queried in analytics — they are a wire contract and
-    /// must not drift.
-    #[test]
-    fn as_str_values_are_stable() {
-        assert_eq!(TraceUploadReason::ZdrTeam.as_str(), "zdr_team");
-        assert_eq!(TraceUploadReason::FeatureOff.as_str(), "feature_off");
-        assert_eq!(TraceUploadReason::NoCredentials.as_str(), "no_credentials");
-        assert_eq!(TraceUploadReason::DirectS3.as_str(), "direct_s3");
-        assert_eq!(TraceUploadReason::Proxy.as_str(), "proxy");
-        assert_eq!(TraceUploadReason::DirectGcs.as_str(), "direct_gcs");
-        assert_eq!(
-            TraceUploadReason::SessionNotFound.as_str(),
-            "session_not_found"
-        );
-    }
-
-    /// Each `UploadMethod` maps to its corresponding reason; `None` (no
-    /// credentials resolved) maps to `NoCredentials`.
-    #[test]
-    fn from_upload_method_maps_each_variant() {
-        assert_eq!(
-            TraceUploadReason::from_upload_method(&None),
-            TraceUploadReason::NoCredentials
-        );
-        assert_eq!(
-            TraceUploadReason::from_upload_method(&Some(UploadMethod::Direct {
-                service_account_key: None,
-            })),
-            TraceUploadReason::DirectGcs
-        );
-        assert_eq!(
-            TraceUploadReason::from_upload_method(&Some(UploadMethod::Proxy {
-                proxy_base_url: String::new(),
-                user_token: String::new(),
-                deployment_key: None,
-                alpha_test_key: None,
-            })),
-            TraceUploadReason::Proxy
-        );
-        assert_eq!(
-            TraceUploadReason::from_upload_method(&Some(UploadMethod::S3 {
-                bucket: String::new(),
-                region: String::new(),
-                credentials_file: None,
-                credentials_content: None,
-                endpoint_url: None,
-            })),
-            TraceUploadReason::DirectS3
-        );
     }
 }

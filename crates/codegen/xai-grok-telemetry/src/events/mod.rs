@@ -3,8 +3,8 @@
 //! lives in shell's integration layer).
 //!
 //! These structs were extracted from `xai-grok-shell` so they can be
-//! reused across binaries (TUI, sampler) without dragging the shell HTTP /
-//! product-analytics client along. The `CompactionScope` helper that drives paired
+//! reused across binaries (TUI, sampler) without dragging shell transport or
+//! product-runtime dependencies along. The `CompactionScope` helper that drives paired
 //! `compaction_triggered`/`compaction_completed` emission stays in shell --
 //! it calls `super::log_event` directly.
 
@@ -262,8 +262,6 @@ pub enum PluginSource {
 #[derive(Serialize)]
 pub struct Login {
     pub auth_method: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<String>,
 }
 
 /// The login-method picker was shown. `trigger` is "startup", "logout", or
@@ -1694,44 +1692,6 @@ pub struct InternalError {
 }
 
 // ---------------------------------------------------------------------------
-// External-OTEL stream meta-events (product-events only — adoption visibility;
-// never exported externally)
-// ---------------------------------------------------------------------------
-
-/// Emitted once per process (post-auth) when the external OTEL stream is
-/// configured. Endpoint reduced to `scheme://host[:port]` — we measure
-/// adoption without learning collector details.
-#[derive(Serialize)]
-pub struct ExternalOtelConfigured {
-    pub metrics_exporter: String,
-    pub logs_exporter: String,
-    pub protocol: String,
-    pub logs_endpoint_origin: String,
-    pub metrics_endpoint_origin: String,
-    pub prompts_gate: bool,
-    pub details_gate: bool,
-    /// Startup source of the master switch: `env` | `config`.
-    pub source: String,
-}
-
-/// Remote (fleet) policy applied to the external stream mid-run.
-#[derive(Serialize)]
-pub struct ExternalOtelRemotePolicyApplied {
-    /// `force_disable` | `gates_locked`.
-    pub action: String,
-}
-
-/// Export-health counters for the external stream, emitted on the internal
-/// pipeline at shutdown (never externally — avoid feedback loops).
-#[derive(Serialize)]
-pub struct ExternalOtelExportHealth {
-    pub records_dropped: u64,
-    pub metric_exports_dropped: u64,
-    pub export_failures: u64,
-    pub export_successes: u64,
-}
-
-// ---------------------------------------------------------------------------
 // Credit limit
 // ---------------------------------------------------------------------------
 
@@ -1841,16 +1801,8 @@ pub enum AuthTokenKind {
 }
 
 /// KPI: a user-facing 401 recovery (`Turn`/`Relay`) terminally failed, forcing a
-/// manual re-login. Product-events only (no external export).
-///
-/// Alerting contract: the event lands under the Shell-origin name
-/// `grok-shell-manual_auth` (the `manual_auth` binding gets the `grok-shell-`
-/// prefix at emit). Count `distinct(principal)`, never raw events — the debounce
-/// is a single slot per process (repeats on the most-recent dead credential
-/// collapse; alternating credentials can re-emit), and `trigger` is whichever
-/// surface fired first, not a reliable per-surface split. `principal` is absent for
-/// unattributed lockouts (all collapse into one NULL bucket). API-key sessions
-/// are excluded (a 401 there means rotate the key, not `/login`).
+/// manual re-login. Product-events only (no external export). The event is
+/// debounced per rejected credential but never carries account identity.
 // `Debug`/`Clone`/`PartialEq` let shell tests assert the emitted event by value
 // (a downstream crate's `cfg(test)` can't turn on `cfg_attr(test, ...)` here).
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -1858,9 +1810,6 @@ pub struct ManualAuth {
     pub reason: ManualAuthReason,
     pub trigger: ManualAuthSurface,
     pub token_kind: AuthTokenKind,
-    /// `user_id` of the locked-out account, when known.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub principal: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2072,12 +2021,6 @@ telemetry_event!(
     "internal_error",
     external = crate::external::schema::map_internal_error
 );
-telemetry_event!(ExternalOtelConfigured, "external_otel_configured");
-telemetry_event!(
-    ExternalOtelRemotePolicyApplied,
-    "external_otel_remote_policy_applied"
-);
-telemetry_event!(ExternalOtelExportHealth, "external_otel_export_health");
 
 // Session lifecycle (structs in session_metrics)
 telemetry_event!(crate::session_metrics::SessionStarted, "session_started");
@@ -2090,23 +2033,6 @@ telemetry_event!(
     crate::session_metrics::DoomLoopRecovery,
     "doom_loop_recovery"
 );
-telemetry_event!(
-    crate::session_metrics::TraceUploadAttempted,
-    "trace_upload_attempted"
-);
-telemetry_event!(
-    crate::session_metrics::TraceUploadSucceeded,
-    "trace_upload_succeeded"
-);
-telemetry_event!(
-    crate::session_metrics::TraceUploadSkipped,
-    "trace_upload_skipped"
-);
-telemetry_event!(
-    crate::session_metrics::TraceUploadFailed,
-    "trace_upload_failed"
-);
-
 // Memory subsystem (structs in memory_telemetry)
 telemetry_event!(
     crate::memory_telemetry::MemorySessionInit,
@@ -2205,33 +2131,20 @@ mod tests {
     fn manual_auth_name_and_shape() {
         assert_eq!(ManualAuth::NAME, "manual_auth");
 
-        let with_principal = serde_json::to_value(ManualAuth {
+        let value = serde_json::to_value(ManualAuth {
             reason: ManualAuthReason::RefreshTokenRejected,
             trigger: ManualAuthSurface::Turn,
             token_kind: AuthTokenKind::OidcSession,
-            principal: Some("user-1".into()),
         })
         .unwrap();
         assert_eq!(
-            with_principal,
+            value,
             serde_json::json!({
                 "reason": "refresh_token_rejected",
                 "trigger": "turn",
                 "token_kind": "oidc_session",
-                "principal": "user-1",
             })
         );
-
-        // `principal` is omitted (not null) when unknown. `LegacySession` is a
-        // reachable fixture (API-key sessions never emit this event).
-        let no_principal = serde_json::to_value(ManualAuth {
-            reason: ManualAuthReason::NoRefreshAuthority,
-            trigger: ManualAuthSurface::Relay,
-            token_kind: AuthTokenKind::LegacySession,
-            principal: None,
-        })
-        .unwrap();
-        assert!(!no_principal.as_object().unwrap().contains_key("principal"));
     }
 
     #[test]

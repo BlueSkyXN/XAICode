@@ -1,15 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-use crate::error::VoiceError;
-
 /// Default STT capture rate (Hz). Shared with the `__mic-capture` helper's
 /// argv default so parent and child agree when `--rate` is omitted.
 pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 
 /// Voice settings retained for crate compatibility.
 ///
-/// Prefer **https** `api_base` (same shape as chat). [`Self::stt_ws_url`] derives
-/// `wss://`. An unset base keeps the non-routable local-build placeholder.
+/// The provider-neutral `[voice]` configuration carrier. An unset base keeps
+/// the non-routable local-build placeholder.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct VoiceConfig {
@@ -17,8 +15,7 @@ pub struct VoiceConfig {
     /// default STT path de-duplicates a leading `v1/` so both become `…/v1/stt`.
     pub api_base: String,
     pub stt_ws_path: String,
-    /// Preferred STT language (catalog code or `"auto"`). Resolved via
-    /// [`crate::language_for_api`] at connect time.
+    /// Preferred STT language (catalog code or `"auto"`).
     pub language: String,
     pub sample_rate: u32,
     pub stt_endpointing_ms: u32,
@@ -49,11 +46,6 @@ impl Default for VoiceConfig {
 }
 
 impl VoiceConfig {
-    /// Streaming STT WebSocket URL. Rejects plaintext `http://` / `ws://`.
-    pub fn stt_ws_url(&self) -> Result<String, VoiceError> {
-        ws_url(&self.api_base, &self.stt_ws_path)
-    }
-
     /// Read only the provider-neutral `[voice]` table. The second argument is
     /// retained for source compatibility with older pager callers, but chat
     /// endpoint settings are intentionally not inherited by voice.
@@ -80,98 +72,9 @@ fn non_empty_str(s: Option<&str>) -> Option<&str> {
     s.map(str::trim).filter(|s| !s.is_empty())
 }
 
-/// `strip_prefix` ignoring ASCII case: RFC 3986 schemes are case-insensitive,
-/// so `HTTP://` must hit the plaintext rejection and `HTTPS://` must work.
-fn strip_scheme<'a>(s: &'a str, scheme: &str) -> Option<&'a str> {
-    s.get(..scheme.len())
-        .filter(|p| p.eq_ignore_ascii_case(scheme))
-        .map(|_| &s[scheme.len()..])
-}
-
-fn ws_url(api_base: &str, path: &str) -> Result<String, VoiceError> {
-    let base = api_base.trim().trim_end_matches('/');
-    let path = path.trim().trim_start_matches('/');
-    if strip_scheme(base, "http://").is_some() || strip_scheme(base, "ws://").is_some() {
-        return Err(VoiceError::Config(format!(
-            "insecure voice api_base {api_base:?}: voice requires a TLS endpoint \
-             (https:// / wss://). Refusing to send the bearer token over a \
-             plaintext connection."
-        )));
-    }
-    let rest = strip_scheme(base, "https://")
-        .or_else(|| strip_scheme(base, "wss://"))
-        .unwrap_or(base);
-    // Default path `/v1/stt`; bases often end in `/v1` or a provider prefix.
-    let path = match (rest.ends_with("/v1"), path.strip_prefix("v1/")) {
-        (true, Some(rest_path)) => rest_path,
-        _ => path,
-    };
-    Ok(format!("wss://{rest}/{path}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_stt_ws_uses_wss() {
-        assert_eq!(
-            VoiceConfig::default().stt_ws_url().unwrap(),
-            "wss://127.0.0.1:0/disabled-voice/v1/stt"
-        );
-    }
-
-    #[test]
-    fn scheme_less_and_wss_bases() {
-        for base in [
-            "voice.invalid",
-            "wss://voice.invalid",
-            "HTTPS://voice.invalid",
-        ] {
-            let cfg = VoiceConfig {
-                api_base: base.into(),
-                ..VoiceConfig::default()
-            };
-            assert_eq!(cfg.stt_ws_url().unwrap(), "wss://voice.invalid/v1/stt");
-        }
-    }
-
-    #[test]
-    fn v1_base_dedupes_default_path() {
-        let cfg = VoiceConfig {
-            api_base: "https://proxy.example.com/v1".into(),
-            ..VoiceConfig::default()
-        };
-        assert_eq!(cfg.stt_ws_url().unwrap(), "wss://proxy.example.com/v1/stt");
-    }
-
-    #[test]
-    fn provider_v1_base_preserves_prefix() {
-        let cfg = VoiceConfig {
-            api_base: "https://proxy.example.com/provider/v1".into(),
-            ..VoiceConfig::default()
-        };
-        assert_eq!(
-            cfg.stt_ws_url().unwrap(),
-            "wss://proxy.example.com/provider/v1/stt"
-        );
-    }
-
-    #[test]
-    fn rejects_plaintext_bases() {
-        for base in [
-            "http://localhost:8080",
-            "ws://localhost:8080",
-            "HTTP://localhost:8080",
-            "Ws://localhost:8080",
-        ] {
-            let cfg = VoiceConfig {
-                api_base: base.into(),
-                ..VoiceConfig::default()
-            };
-            assert!(matches!(cfg.stt_ws_url(), Err(VoiceError::Config(_))));
-        }
-    }
 
     #[test]
     fn does_not_inherit_chat_endpoint_when_voice_api_base_unset() {
@@ -184,10 +87,6 @@ provider_api_base_url = "https://proxy.example.com/provider/v1"
         .unwrap();
         let cfg = VoiceConfig::from_config_table(&table, None);
         assert_eq!(cfg.api_base, VoiceConfig::default().api_base);
-        assert_eq!(
-            cfg.stt_ws_url().unwrap(),
-            "wss://127.0.0.1:0/disabled-voice/v1/stt"
-        );
     }
 
     #[test]
@@ -218,10 +117,6 @@ api_base = "  "
         .unwrap();
         let cfg = VoiceConfig::from_config_table(&table, None);
         assert_eq!(cfg.api_base, VoiceConfig::default().api_base);
-        assert_eq!(
-            cfg.stt_ws_url().unwrap(),
-            "wss://127.0.0.1:0/disabled-voice/v1/stt"
-        );
     }
 
     #[test]
@@ -231,10 +126,6 @@ api_base = "  "
             Some("https://proxy.example.com/v1/"),
         );
         assert_eq!(cfg.api_base, VoiceConfig::default().api_base);
-        assert_eq!(
-            cfg.stt_ws_url().unwrap(),
-            "wss://127.0.0.1:0/disabled-voice/v1/stt"
-        );
 
         // Whitespace-only resolved base falls through to the default.
         let cfg = VoiceConfig::from_config_table(&toml::Table::new(), Some("  "));
@@ -270,7 +161,6 @@ language = "es"
         let cfg = VoiceConfig::from_config_table(&table, None);
         assert_eq!(cfg.api_base, "https://voice.example.com");
         assert_eq!(cfg.language, "es");
-        assert_eq!(cfg.stt_ws_url().unwrap(), "wss://voice.example.com/v1/stt");
     }
 
     #[test]

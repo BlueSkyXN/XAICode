@@ -18,7 +18,7 @@ fn external_stream_end_to_end() {
     // Resolve through the real config path (double opt-in, gates off).
     let mut cfg = xai_grok_telemetry::external::ExternalOtelConfig::resolve_with(
         |name| match name {
-            "GROK_EXTERNAL_OTEL" => Some("1".into()),
+            "XAICODE_EXTERNAL_OTEL" => Some("1".into()),
             "OTEL_LOGS_EXPORTER" | "OTEL_METRICS_EXPORTER" => Some("otlp".into()),
             "OTEL_EXPORTER_OTLP_ENDPOINT" => Some(endpoint.clone()),
             // Keep intervals short so the test is fast; flush() forces anyway.
@@ -38,11 +38,8 @@ fn external_stream_end_to_end() {
     xai_grok_telemetry::external::init(Some(cfg));
     assert!(xai_grok_telemetry::external::is_active());
 
-    // Emit through the same funnel production uses — with the product events client
-    // never initialized (TelemetryMode effectively Disabled) and no auth at
-    // all, pinning the Disabled half of the G7 independence matrix at the
-    // funnel level: the external sink fires anyway.
-    assert!(!xai_grok_telemetry::is_enabled());
+    // Emit through the same funnel production uses. Customer export is
+    // independently controlled by the explicit generic OTLP opt-in.
     xai_grok_telemetry::log_event(xai_grok_telemetry::events::SessionNew {
         session_id: "sess-int-1".into(),
         client_identifier: None,
@@ -52,9 +49,9 @@ fn external_stream_end_to_end() {
     });
     xai_grok_telemetry::log_event(xai_grok_telemetry::events::SessionHarness {
         session_id: "sess-int-1".into(),
-        client_identifier: Some("grok-pager".into()),
-        model_id: "grok-4".into(),
-        agent_name: "grok-build-plan".into(),
+        client_identifier: Some("xaicode-pager".into()),
+        model_id: "model-a".into(),
+        agent_name: "xaicode-build-plan".into(),
         permission_mode: xai_grok_telemetry::enums::PermissionMode::Ask,
         mcp_server_names: vec![CANARY_MCP.into()],
         plugin_names: vec![],
@@ -68,7 +65,7 @@ fn external_stream_end_to_end() {
     });
     xai_grok_telemetry::log_event(xai_grok_telemetry::events::PromptSubmitted {
         prompt_length: CANARY_PROMPT.len(),
-        model_id: "grok-4".into(),
+        model_id: "model-a".into(),
         client_identifier: None,
         screen_mode: None,
         prompt_text: Some(CANARY_PROMPT.into()),
@@ -111,7 +108,7 @@ fn external_stream_end_to_end() {
             for sl in &rl.scope_logs {
                 assert_eq!(
                     sl.scope.as_ref().map(|s| s.name.as_str()),
-                    Some("ai.xai.grok_code")
+                    Some("ai.xaicode")
                 );
                 for record in &sl.log_records {
                     event_names.push(record.event_name.clone());
@@ -122,13 +119,13 @@ fn external_stream_end_to_end() {
     assert!(
         resource_service_name
             .as_deref()
-            .is_some_and(|s| s.contains("grok-cli")),
-        "service.name=grok-cli is a wire commitment: {resource_service_name:?}"
+            .is_some_and(|s| s.contains("xaicode")),
+        "service.name=xaicode is a wire commitment: {resource_service_name:?}"
     );
     for expected in [
-        "grok_code.session_start",
-        "grok_code.user_prompt",
-        "grok_code.api_request",
+        "ai.xaicode.session_start",
+        "ai.xaicode.user_prompt",
+        "ai.xaicode.api_request",
     ] {
         assert!(
             event_names.iter().any(|n| n == expected),
@@ -140,7 +137,7 @@ fn external_stream_end_to_end() {
     assert_eq!(
         event_names
             .iter()
-            .filter(|n| *n == "grok_code.session_start")
+            .filter(|n| *n == "ai.xaicode.session_start")
             .count(),
         1
     );
@@ -162,7 +159,7 @@ fn external_stream_end_to_end() {
                                 as i32,
                             "default temporality must be Delta (CC parity)"
                         );
-                        if metric.name == "grok_code.session.count" {
+                        if metric.name == "ai.xaicode.session.count" {
                             for dp in &sum.data_points {
                                 if let Some(
                                     opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsInt(v),
@@ -178,10 +175,10 @@ fn external_stream_end_to_end() {
         }
     }
     assert!(
-        metric_names.iter().any(|n| n == "grok_code.session.count"),
+        metric_names.iter().any(|n| n == "ai.xaicode.session.count"),
         "missing session.count in {metric_names:?}"
     );
-    assert!(metric_names.iter().any(|n| n == "grok_code.token.usage"));
+    assert!(metric_names.iter().any(|n| n == "ai.xaicode.token.usage"));
     assert_eq!(
         session_count_total, 1,
         "session.count must increment exactly once per SessionNew"
@@ -216,7 +213,7 @@ fn external_stream_end_to_end() {
     let logs_before = collected.logs_len();
     xai_grok_telemetry::log_event(xai_grok_telemetry::events::PromptSubmitted {
         prompt_length: 1,
-        model_id: "grok-4".into(),
+        model_id: "model-a".into(),
         client_identifier: None,
         screen_mode: None,
         prompt_text: None,

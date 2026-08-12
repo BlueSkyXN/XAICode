@@ -1,8 +1,6 @@
 //! Telemetry-engine configuration.
 //!
-//! Extracted from `xai-grok-shell::agent::config` so the data-collector
-//! engine can construct a [`TelemetryClient`](crate::client::TelemetryClient)
-//! without a build-time dependency on the shell.
+//! Shared compatibility configuration for local diagnostics and customer OTLP.
 //!
 //! Shell still re-exports these types from their original paths so existing
 //! call sites (and `Config` derive impls) compile unchanged.
@@ -11,7 +9,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// - `Disabled` -- nothing sent (enterprise default)
 /// - `SessionMetrics` -- metadata-only lifecycle events, no content
-/// - `Enabled` -- full product telemetry (events + Mixpanel)
+/// - `Enabled` -- legacy full-telemetry value, accepted for config
+///   compatibility but with no hosted exporter
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TelemetryMode {
     #[default]
@@ -96,7 +95,11 @@ pub struct TelemetryConfig {
     pub enabled: Option<bool>,
     pub events_url: Option<String>,
     pub events_api_key: Option<String>,
+    /// Legacy product-analytics token, parsed and round-tripped for config
+    /// compatibility but never used by the clean runtime.
     pub mixpanel_token: Option<String>,
+    /// Legacy product-analytics toggle, retained as an inert compatibility
+    /// field; generic customer OTLP uses the `otel_*` fields below.
     pub mixpanel_enabled: bool,
     /// `None` = inherit from `[features] telemetry`. `Some(false)` = disable GCS uploads only.
     pub trace_upload: Option<bool>,

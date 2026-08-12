@@ -54,8 +54,6 @@ pub(crate) const ITERM2_CLIPBOARD_PERMISSION_ID: DiagnosticId =
     DiagnosticId::new("terminal", "iterm2-clipboard-permission");
 pub(crate) const VSCODE_SSH_NON_ASCII_ID: DiagnosticId =
     DiagnosticId::new("clipboard", "vscode-ssh-non-ascii");
-pub(crate) const VOICE_NO_INPUT_DEVICE_ID: DiagnosticId =
-    DiagnosticId::new("voice", "no-input-device");
 
 impl DiagnosticReport {
     pub fn issue_count(&self) -> usize {
@@ -94,18 +92,6 @@ pub struct DiagnosticFacts {
     pub keyboard: Option<KeyboardFact>,
     pub newline: Option<NewlineFact>,
     pub clipboard: ClipboardFacts,
-    /// Passive mic enumeration when voice capture is available. `None` omits the
-    /// Voice section (no-audio builds, or TUI when voice mode is off).
-    pub voice: Option<VoiceFacts>,
-}
-
-/// Result of a passive input-device lookup (does not open a capture stream).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum VoiceFacts {
-    /// Device (or Linux recorder) capture would open.
-    Device { name: String, detail: String },
-    /// Audio is compiled in but no default input / recorder exists.
-    Missing { error: String },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

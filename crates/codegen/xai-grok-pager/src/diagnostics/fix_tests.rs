@@ -40,7 +40,6 @@ pub(super) fn report() -> DiagnosticReport {
                 delivery: ClipboardDelivery::Failed,
                 fix: None,
             },
-            voice: None,
         },
         findings: Vec::new(),
         probe_notes: Vec::new(),

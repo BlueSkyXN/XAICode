@@ -388,7 +388,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
         }
         let result = agent
             .prompt
-            .draw(frame.buffer_mut(), prompt_area, None, &style, None, None);
+            .draw(frame.buffer_mut(), prompt_area, None, &style, None);
         (
             result.cursor_pos,
             result

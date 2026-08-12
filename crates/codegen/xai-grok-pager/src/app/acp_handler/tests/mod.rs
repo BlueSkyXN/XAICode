@@ -286,30 +286,6 @@ pub(super) fn follow_ups_ext_with_prompt(
         std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
     )
 }
-pub(super) fn voice_settings_update(enabled: bool) -> acp::ExtNotification {
-    acp::ExtNotification::new(
-        "x.ai/settings/update",
-        std::sync::Arc::from(
-            serde_json::value::to_raw_value(
-                    &serde_json::json!({ "voice_mode_enabled": enabled }),
-                )
-                .unwrap(),
-        ),
-    )
-}
-pub(super) fn tier_settings_update(tier: &str) -> acp::ExtNotification {
-    acp::ExtNotification::new(
-        "x.ai/settings/update",
-        std::sync::Arc::from(
-            serde_json::value::to_raw_value(
-                    &serde_json::json!({
-                    "subscription_tier_display": tier
-                }),
-                )
-                .unwrap(),
-        ),
-    )
-}
 pub(super) fn group_tool_verbs_settings_update(
     value: Option<bool>,
 ) -> acp::ExtNotification {
@@ -2023,7 +1999,6 @@ pub(super) fn seed_owner_agent_with_open_modal(app: &mut AppView) {
             source: "local".into(),
             wire_source: McpWireSource::Local,
             plugin_name: None,
-            is_managed_gateway: false,
         }],
         ),
     );
@@ -2126,7 +2101,6 @@ mod permissions;
 mod session_events;
 mod follow_ups;
 mod settings;
-mod announcements;
 mod scheduled_tasks;
 mod queue_and_adoption;
 mod plan_mode;

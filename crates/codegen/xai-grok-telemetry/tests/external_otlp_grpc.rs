@@ -19,7 +19,7 @@ fn external_stream_grpc_end_to_end() {
 
     let mut cfg = xai_grok_telemetry::external::ExternalOtelConfig::resolve_with(
         |name| match name {
-            "GROK_EXTERNAL_OTEL" => Some("1".into()),
+            "XAICODE_EXTERNAL_OTEL" => Some("1".into()),
             "OTEL_LOGS_EXPORTER" | "OTEL_METRICS_EXPORTER" => Some("otlp".into()),
             "OTEL_EXPORTER_OTLP_ENDPOINT" => Some(endpoint.clone()),
             "OTEL_EXPORTER_OTLP_PROTOCOL" => Some("grpc".into()),
@@ -48,9 +48,9 @@ fn external_stream_grpc_end_to_end() {
     });
     xai_grok_telemetry::log_event(xai_grok_telemetry::events::SessionHarness {
         session_id: "sess-grpc-1".into(),
-        client_identifier: Some("grok-pager".into()),
-        model_id: "grok-4".into(),
-        agent_name: "grok-build-plan".into(),
+        client_identifier: Some("xaicode-pager".into()),
+        model_id: "model-a".into(),
+        agent_name: "xaicode-build-plan".into(),
         permission_mode: xai_grok_telemetry::enums::PermissionMode::Ask,
         mcp_server_names: vec![CANARY_MCP.into()],
         plugin_names: vec![],
@@ -64,7 +64,7 @@ fn external_stream_grpc_end_to_end() {
     });
     xai_grok_telemetry::log_event(xai_grok_telemetry::events::PromptSubmitted {
         prompt_length: CANARY_PROMPT.len(),
-        model_id: "grok-4".into(),
+        model_id: "model-a".into(),
         client_identifier: None,
         screen_mode: None,
         prompt_text: Some(CANARY_PROMPT.into()),
@@ -89,9 +89,9 @@ fn external_stream_grpc_end_to_end() {
 
     let event_names = col::event_names(&collected);
     for expected in [
-        "grok_code.session_start",
-        "grok_code.user_prompt",
-        "grok_code.api_request",
+        "ai.xaicode.session_start",
+        "ai.xaicode.user_prompt",
+        "ai.xaicode.api_request",
     ] {
         assert!(
             event_names.iter().any(|n| n == expected),
@@ -101,11 +101,11 @@ fn external_stream_grpc_end_to_end() {
 
     let metrics = col::metric_points(&collected);
     assert!(
-        metrics.iter().any(|p| p.name == "grok_code.session.count"),
+        metrics.iter().any(|p| p.name == "ai.xaicode.session.count"),
         "missing session.count in {metrics:?}"
     );
     assert!(
-        metrics.iter().any(|p| p.name == "grok_code.token.usage"),
+        metrics.iter().any(|p| p.name == "ai.xaicode.token.usage"),
         "missing token.usage in {metrics:?}"
     );
     for point in metrics {

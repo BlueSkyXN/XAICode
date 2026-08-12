@@ -52,8 +52,7 @@ pub(crate) fn sample_rss_bytes() -> u64 {
 
 /// Per-tool success/failure breakdown for a single turn.
 ///
-/// Serialized as part of `SessionSignalsDelta` and synced to backend
-/// analytics for per-tool-name stats (e.g. "bash fails 10% of the time").
+/// Serialized as part of `SessionSignalsDelta` for local per-tool-name stats.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolOutcome {
@@ -78,8 +77,7 @@ pub struct ToolDuration {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool_call_id: String,
     /// Dispatch wall-clock ms (start → result ready), including lock wait and
-    /// in-dispatch auth retries. A managed-MCP reauth retry adds its second
-    /// attempt here; the reauth handshake wait itself is excluded.
+    /// ordinary in-dispatch authentication retries.
     pub duration_ms: u64,
 }
 
@@ -322,32 +320,6 @@ pub struct SessionSignals {
     #[serde(default)]
     pub inference_idle_timeout_configured_secs: Option<u64>,
 
-    // === GCS Upload Queue ===
-    /// Total items enqueued for background upload.
-    #[serde(default)]
-    pub gcs_queue_enqueued: u64,
-    /// Successful background uploads.
-    #[serde(default)]
-    pub gcs_queue_uploaded: u64,
-    /// Items that exhausted retry budget (superset of expired).
-    #[serde(default)]
-    pub gcs_queue_failed: u64,
-    /// Enqueue failures that fell back to inline upload.
-    #[serde(default)]
-    pub gcs_queue_fallbacks: u64,
-    /// Circuit breaker activations.
-    #[serde(default)]
-    pub gcs_queue_circuit_breaker_trips: u64,
-    /// Current queue depth (snapshot gauge).
-    #[serde(default)]
-    pub gcs_queue_pending: u64,
-    /// Current disk usage of queue temp dir in bytes (snapshot gauge).
-    #[serde(default)]
-    pub gcs_queue_pending_bytes: u64,
-    /// Orphaned temp files cleaned up at startup.
-    #[serde(default)]
-    pub gcs_queue_orphans_cleaned: u64,
-
     // === Ratings ===
     /// Number of positive ratings (thumbs-up / stars >= 4)
     pub positive_ratings: u32,
@@ -501,19 +473,6 @@ pub enum SignalEvent {
     /// Called once at session construction; preserved on the backend when unset.
     SetTracingConfig {
         inference_idle_timeout_configured_secs: u64,
-    },
-
-    /// Snapshot GCS upload queue stats into signals. The actor reads the atomics
-    /// once and stores plain u64 values — the Arc is not retained in actor state.
-    RecordGcsQueueSnapshot {
-        enqueued: u64,
-        uploaded: u64,
-        failed: u64,
-        fallbacks: u64,
-        circuit_breaker_trips: u64,
-        pending: u64,
-        pending_bytes: u64,
-        orphans_cleaned: u64,
     },
 
     // === Rating Events ===
@@ -770,24 +729,6 @@ impl SessionSignalsHandle {
     pub(crate) fn set_tracing_config(&self, inference_idle_timeout_secs: u64) {
         let _ = self.tx.send(SignalEvent::SetTracingConfig {
             inference_idle_timeout_configured_secs: inference_idle_timeout_secs,
-        });
-    }
-
-    /// Snapshot GCS upload queue stats into signals.
-    ///
-    /// Reads the atomics from `UploadQueueStats` once and sends plain u64 values
-    /// to the actor — the Arc is NOT retained in the signal event.
-    pub(crate) fn snapshot_gcs_queue(&self, stats: &xai_file_utils::queue::UploadQueueStats) {
-        use std::sync::atomic::Ordering;
-        let _ = self.tx.send(SignalEvent::RecordGcsQueueSnapshot {
-            enqueued: stats.enqueued.load(Ordering::Relaxed),
-            uploaded: stats.uploaded.load(Ordering::Relaxed),
-            failed: stats.failed.load(Ordering::Relaxed),
-            fallbacks: stats.enqueue_fallbacks.load(Ordering::Relaxed),
-            circuit_breaker_trips: stats.circuit_breaker_trips.load(Ordering::Relaxed),
-            pending: stats.pending.load(Ordering::Relaxed),
-            pending_bytes: stats.pending_bytes.load(Ordering::Relaxed),
-            orphans_cleaned: xai_file_utils::queue::last_orphans_cleaned(),
         });
     }
 
@@ -1212,26 +1153,6 @@ impl SessionSignalsActor {
                     self.signals.inference_idle_timeout_configured_secs =
                         Some(inference_idle_timeout_configured_secs);
                 }
-                SignalEvent::RecordGcsQueueSnapshot {
-                    enqueued,
-                    uploaded,
-                    failed,
-                    fallbacks,
-                    circuit_breaker_trips,
-                    pending,
-                    pending_bytes,
-                    orphans_cleaned,
-                } => {
-                    self.signals.gcs_queue_enqueued = enqueued;
-                    self.signals.gcs_queue_uploaded = uploaded;
-                    self.signals.gcs_queue_failed = failed;
-                    self.signals.gcs_queue_fallbacks = fallbacks;
-                    self.signals.gcs_queue_circuit_breaker_trips = circuit_breaker_trips;
-                    self.signals.gcs_queue_pending = pending;
-                    self.signals.gcs_queue_pending_bytes = pending_bytes;
-                    self.signals.gcs_queue_orphans_cleaned = orphans_cleaned;
-                }
-
                 // === Tool Events ===
                 SignalEvent::RecordToolCall(tool_name) => {
                     self.signals.tool_call_count += 1;
@@ -3033,36 +2954,6 @@ mod tests {
 
         let snap = handle.snapshot().await.unwrap();
         assert_eq!(snap.inference_idle_timeout_configured_secs, Some(300));
-
-        handle.shutdown();
-        actor_handle.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_gcs_queue_snapshot() {
-        let (handle, actor) = SessionSignalsActor::new();
-        let actor_handle = tokio::spawn(actor.run());
-
-        let _ = handle.tx.send(SignalEvent::RecordGcsQueueSnapshot {
-            enqueued: 50,
-            uploaded: 48,
-            failed: 1,
-            fallbacks: 1,
-            circuit_breaker_trips: 0,
-            pending: 3,
-            pending_bytes: 1_048_576,
-            orphans_cleaned: 5,
-        });
-
-        let snap = handle.snapshot().await.unwrap();
-        assert_eq!(snap.gcs_queue_enqueued, 50);
-        assert_eq!(snap.gcs_queue_uploaded, 48);
-        assert_eq!(snap.gcs_queue_failed, 1);
-        assert_eq!(snap.gcs_queue_fallbacks, 1);
-        assert_eq!(snap.gcs_queue_circuit_breaker_trips, 0);
-        assert_eq!(snap.gcs_queue_pending, 3);
-        assert_eq!(snap.gcs_queue_pending_bytes, 1_048_576);
-        assert_eq!(snap.gcs_queue_orphans_cleaned, 5);
 
         handle.shutdown();
         actor_handle.await.unwrap();
