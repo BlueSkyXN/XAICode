@@ -37,5 +37,6 @@ Runtime, providers, auth, ACP, persistence and hosted seams. Read before changin
 
 ## Validation
 
-Use root commands plus narrow tests. Provider/auth needs loopback and production-like
-no-vendor-egress checks; persistence needs temporary `GROK_HOME` reopen/resume/search.
+Use the root remote-first CI/CD workflow plus narrow tests in GitHub Actions. Provider/auth
+needs loopback and production-like no-vendor-egress checks; persistence needs temporary
+`GROK_HOME` reopen/resume/search. Local compilation still requires explicit authorization.

@@ -66,23 +66,48 @@ Do not infer behavior from names: MCP browser OAuth is not Grok/xAI account logi
 
 ## Commands
 
-Run focused package commands. The workspace is large; do not default to `--workspace`.
+The workspace is large. Local work is remote-first: run read-only Git, static contracts and
+formatting locally; let GitHub Actions run compilation, lint, tests, binary smoke and packaging
+on the exact candidate SHA. The Cargo commands below document the CI/release contract and are
+not authorization to run them locally. Do not default to `--workspace`.
 
 | Command | Purpose | Scope | Sandbox and dependency notes |
 |---|---|---|---|
-| `cargo check -p xaicode` | Fast compile validation | Composition package | May need cached crates and DotSlash `protoc`; first use can require network |
-| `cargo clippy -p xaicode --no-deps -- -D warnings` | CI-equivalent lint | Composition package | May need cached dependencies; this is the current CI command |
-| `cargo fmt --check --all` | Formatting validation | Workspace Rust files | No external service; does not rewrite files |
-| `cargo test -p xaicode --all-targets` | Composition-root tests | Composition package | May compile a large dependency closure; no live credentials should be required |
-| `cargo build -p xaicode --bin xaicode` | Debug build of primary binary | Composition package | May need network on the first DotSlash/dependency resolution |
-| `cargo build -p xaicode --bin xai-grok-pager` | Compatibility-alias build | Composition package | Run when binary aliases, CLI startup, or release packaging changes |
-| `cargo build -p xaicode --profile release-dist --bin xaicode` | Release artifact build | Composition package | Expensive; may need network for uncached dependencies/tools |
+| `cargo check -p xaicode` | Fast compile validation | Composition package | GitHub Actions by default; local execution requires explicit authorization and can create a large `target/` |
+| `cargo clippy -p xaicode --no-deps -- -D warnings` | CI-equivalent lint | Composition package | GitHub Actions by default; local execution requires explicit authorization |
+| `cargo fmt --check --all` | Formatting validation | Workspace Rust files | Local-safe; no external service and does not populate `target/` |
+| `cargo test -p xaicode --all-targets` | Composition-root tests | Composition package | GitHub Actions by default; may compile a large dependency closure |
+| `cargo build -p xaicode --bin xaicode` | Debug build of primary binary | Composition package | GitHub Actions by default; local execution requires explicit authorization |
+| `cargo build -p xaicode --bin xai-grok-pager` | Compatibility-alias build | Composition package | GitHub Actions by default when binary aliases or startup change |
+| `cargo build -p xaicode --profile release-dist --bin xaicode` | Release artifact build | Composition package | Release workflow only by default; expensive and may need network/tools |
 | `git diff --check` | Whitespace and patch sanity | Current worktree | Read-only with respect to tracked content |
 | `python3 scripts/xaicode_maintenance.py check-contract` | Provenance and clean-contract check | Tracked source/config | Standard library only; no network or build |
 | `python3 scripts/xaicode_maintenance.py audit-upstream [--target <commit>]` | Three-tree overlap audit | Local XAICode/upstream Git metadata | Read-only; defaults to the pinned `UPSTREAM.toml` migration target and needs a local upstream checkout containing the refs |
 
 `bin/protoc` is a DotSlash manifest for `protoc` v29.3. If unavailable offline, report the
 limitation; use an already available compatible `PROTOC`/`PROTOC_INCLUDE`, not a substitute.
+
+## Remote-first CI/CD workflow
+
+- Without explicit user authorization, do not run local commands that compile Rust or populate
+  build caches, including `cargo check`, `cargo clippy`, `cargo test`, `cargo build`, `cargo run`,
+  `cargo bench`, `cargo install` or wrappers that invoke them. Reading Cargo metadata may still
+  resolve dependencies; prefer direct manifest inspection unless metadata is necessary.
+- Local validation defaults to `git diff --check`, `cargo fmt --check --all`,
+  `python3 scripts/xaicode_maintenance.py check-contract` and other standard-library/static
+  checks that do not create `target/` artifacts.
+- Push a candidate branch or update its pull request, then use `.github/workflows/ci.yml` as the
+  compile/test authority. A candidate is CI-validated only when the completed successful run's
+  `headSha` exactly matches the current remote branch and PR head.
+- On CI failure, inspect the failed GitHub Actions job and logs, make the smallest source fix,
+  and rerun CI. Do not silently fall back to a local full build merely to shorten diagnosis.
+- `.github/workflows/release.yml` owns release-profile builds, cross-platform binaries, artifact
+  packaging and draft Release creation. Tagging, manual workflow dispatch, Release creation and
+  deployment still require the separate authorization defined below.
+- If local compilation is explicitly authorized, state the command and expected disk/time cost
+  first. Use a task-scoped temporary `CARGO_TARGET_DIR` outside the repository with
+  `CARGO_INCREMENTAL=0`; remove only that task-created directory after verification. Never clean
+  a pre-existing shared Cargo cache or another worktree's `target/` without explicit permission.
 
 ## Clean product contract
 
@@ -226,7 +251,8 @@ Stop the migration and report evidence when:
 
 ## Validation standards
 
-Validation depth follows the changed boundary:
+Validation depth follows the changed boundary. Map these checks to the corresponding GitHub
+Actions jobs by default; do not execute local compile/test commands unless explicitly authorized:
 
 1. Rust: format plus narrow relevant test.
 2. Composition/provider/auth: check, CI-equivalent clippy and package tests when available.

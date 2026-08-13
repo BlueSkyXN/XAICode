@@ -25,6 +25,7 @@ transport startup, or server configuration.
 
 ## Validation
 
-Use focused `xai-grok-mcp` tests when its dependency closure is available, then run the root
-`xaicode` package checks. Cover refresh success, terminal versus transient refresh failure,
-non-interactive behavior, deduplicated browser flow and concurrent credential persistence.
+Use the root remote-first CI/CD workflow. Run focused `xai-grok-mcp` tests and root `xaicode`
+package checks in GitHub Actions; local compilation requires explicit authorization. Cover
+refresh success, terminal versus transient refresh failure, non-interactive behavior,
+deduplicated browser flow and concurrent credential persistence.
