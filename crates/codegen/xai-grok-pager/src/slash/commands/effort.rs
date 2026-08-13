@@ -241,8 +241,8 @@ mod tests {
     #[test]
     fn none_accepted_when_model_menu_offers_it() {
         let mut state = ModelState::default();
-        let id = acp::ModelId::new(Arc::from("voice-dual"));
-        let info = acp::ModelInfo::new(id.clone(), "Voice Dual".to_string()).meta(
+        let id = acp::ModelId::new(Arc::from("reasoning-none"));
+        let info = acp::ModelInfo::new(id.clone(), "Reasoning None".to_string()).meta(
             serde_json::json!({
                 "supportsReasoningEffort": true,
                 "reasoningEfforts": [

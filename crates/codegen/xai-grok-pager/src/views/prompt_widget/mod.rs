@@ -335,63 +335,6 @@ impl PromptInfo<'_> {
     }
 }
 
-/// Live voice-capture overlay for the prompt.
-///
-/// Interim STT paints as muted italic ghost text (not in the textarea).
-/// Finalized STT is real prompt content and stays editable while the mic is open.
-/// Overlay presence (even with no interim) marks voice active for callers that
-/// skip empty-state placeholders while capturing.
-#[derive(Debug, Clone, Copy)]
-pub struct VoicePromptOverlay<'a> {
-    /// Latest interim transcript, if any.
-    pub interim: Option<&'a str>,
-    /// Theme accent associated with this overlay.
-    pub color: ratatui::style::Color,
-}
-
-/// Greedy word-wrap the interim transcript into at most `max_rows` lines of
-/// `max_w` columns, appending an ellipsis to the last line when truncated.
-fn wrap_voice_interim(text: &str, max_w: usize, max_rows: usize) -> Vec<String> {
-    use unicode_width::UnicodeWidthStr;
-    if max_w == 0 || max_rows == 0 {
-        return Vec::new();
-    }
-    let mut lines: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let mut cur_w = 0usize;
-    for word in text.split_whitespace() {
-        let ww = UnicodeWidthStr::width(word);
-        if !cur.is_empty() && cur_w + 1 + ww > max_w {
-            lines.push(std::mem::take(&mut cur));
-            cur_w = 0;
-        }
-        if cur.is_empty() {
-            if ww > max_w {
-                cur = crate::render::line_utils::truncate_str(word, max_w);
-                cur_w = UnicodeWidthStr::width(cur.as_str());
-            } else {
-                cur.push_str(word);
-                cur_w = ww;
-            }
-        } else {
-            cur.push(' ');
-            cur.push_str(word);
-            cur_w += 1 + ww;
-        }
-    }
-    if !cur.is_empty() {
-        lines.push(cur);
-    }
-    if lines.len() > max_rows {
-        lines.truncate(max_rows);
-        if let Some(last) = lines.last_mut() {
-            let trimmed = crate::render::line_utils::truncate_str(last, max_w.saturating_sub(1));
-            *last = format!("{trimmed}\u{2026}");
-        }
-    }
-    lines
-}
-
 /// Result of rendering the prompt.
 pub struct PromptRenderResult {
     /// Cursor position if the prompt wants a visible cursor.
@@ -1155,12 +1098,6 @@ impl PromptWidget {
             .set_recap_visible(visible);
     }
 
-    pub(crate) fn set_voice_visible(&mut self, visible: bool) {
-        self.slash_controller
-            .registry_mut()
-            .set_voice_visible(visible);
-    }
-
     /// Gate `/auto` on the auto permission-mode feature.
     /// See [`crate::slash::SlashController::set_auto_mode_available`].
     pub(crate) fn set_auto_mode_available(&mut self, available: bool) {
@@ -1850,7 +1787,7 @@ impl PromptWidget {
                     textarea.has_selection = evt.has_selection,
                     "backspace_no_effect"
                 );
-                // Product analytics event (when telemetry is enabled).
+                // Customer diagnostics event (when the explicit stream is enabled).
                 log_event(evt);
             }
             PromptEvent::Ignored
@@ -2901,7 +2838,6 @@ impl PromptWidget {
         overlay_area: Option<Rect>,
         style: &PromptStyle,
         info: Option<&PromptInfo>,
-        voice: Option<VoicePromptOverlay>,
     ) -> PromptRenderResult {
         if area.height == 0 || area.width < 4 {
             return PromptRenderResult {
@@ -3155,50 +3091,10 @@ impl PromptWidget {
             (snap.active, snap.inline_ghost.is_some())
         };
 
-        // Interim STT: muted italic overlay (not in the textarea). Finalized
-        // text remains the real, editable draft.
-        let voice_interim_shown = if let Some(v) = voice
-            && let Some(interim) = v.interim.filter(|t| !t.trim().is_empty())
-            && ta_area.width > 0
-            && ta_area.height > 0
-        {
-            let interim_fg = crate::render::color::blend_color(bg, theme.text_secondary, 0.7)
-                .unwrap_or(theme.gray);
-            let interim_style = Style::default()
-                .fg(interim_fg)
-                .bg(bg)
-                .add_modifier(Modifier::ITALIC);
-            if self.textarea.text().is_empty() {
-                let lines =
-                    wrap_voice_interim(interim, ta_area.width as usize, ta_area.height as usize);
-                for (i, line) in lines.iter().enumerate() {
-                    buf.set_string(ta_area.x, ta_area.y + i as u16, line, interim_style);
-                }
-            } else {
-                // Ghost suffix after the finalized draft (not at the caret).
-                let end = self.textarea.text().len();
-                if let Some((start_x, row_y)) =
-                    self.textarea
-                        .screen_position_of(end, ta_area, self.textarea_state)
-                {
-                    let display = format!(" {interim}");
-                    let avail = (ta_area.x + ta_area.width).saturating_sub(start_x) as usize;
-                    if avail > 0 {
-                        let truncated = crate::render::line_utils::truncate_str(&display, avail);
-                        buf.set_string(start_x, row_y, &truncated, interim_style);
-                    }
-                }
-            }
-            true
-        } else {
-            false
-        };
-
         // Placeholder text when empty (unfocused, or opted in while focused).
         if self.textarea.text().is_empty()
             && ta_area.width > 0
             && (!style.focused || style.placeholder_when_focused)
-            && !voice_interim_shown
         {
             let placeholder = style.placeholder_override.unwrap_or("Build anything");
             // `set_string` clips at the buffer edge, not at the textarea, so a placeholder longer than the box would paint over its border.
@@ -3276,41 +3172,34 @@ impl PromptWidget {
             crate::render::color::blend_area(buf, dim_area, Some((bg, 0.66)), None);
         }
 
-        // Finalized draft stays editable during voice; hide the caret only when
-        // the box is empty and interim is standing in for it.
-        let hide_caret_for_empty_interim = self.textarea.text().is_empty()
-            && voice.is_some_and(|v| v.interim.is_some_and(|t| !t.trim().is_empty()));
-        let cursor_pos = if style.focused && !hide_caret_for_empty_interim {
+        let cursor_pos = if style.focused {
             self.textarea
                 .cursor_pos_with_state(ta_area, self.textarea_state)
         } else {
             None
         };
 
-        // Ghost suffixes (shell completion / predicted prompt). Voice interim
-        // owns the end-of-text cells when shown, so skip both ghosts then.
-        if !voice_interim_shown {
-            if let Some(ghost) = self.suggestions.ghost_text()
-                && self.textarea.cursor() == self.textarea.text().len()
-                && !slash_active
-                && !slash_has_inline_ghost
-                && let Some((cx, cy)) = cursor_pos
-            {
-                let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
-                if avail > 0 {
-                    let truncated = crate::render::line_utils::truncate_str(ghost, avail);
-                    buf.set_string(cx, cy, &truncated, theme.ghost_text_style().bg(bg));
-                }
+        // Ghost suffixes (shell completion / predicted prompt).
+        if let Some(ghost) = self.suggestions.ghost_text()
+            && self.textarea.cursor() == self.textarea.text().len()
+            && !slash_active
+            && !slash_has_inline_ghost
+            && let Some((cx, cy)) = cursor_pos
+        {
+            let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
+            if avail > 0 {
+                let truncated = crate::render::line_utils::truncate_str(ghost, avail);
+                buf.set_string(cx, cy, &truncated, theme.ghost_text_style().bg(bg));
             }
+        }
 
-            if let Some(ghost) = self.prompt_suggestion_ghost()
-                && let Some((cx, cy)) = cursor_pos
-            {
-                let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
-                if avail > 0 {
-                    let truncated = crate::render::line_utils::truncate_str(ghost, avail);
-                    buf.set_string(cx, cy, &truncated, theme.ghost_text_style().bg(bg));
-                }
+        if let Some(ghost) = self.prompt_suggestion_ghost()
+            && let Some((cx, cy)) = cursor_pos
+        {
+            let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
+            if avail > 0 {
+                let truncated = crate::render::line_utils::truncate_str(ghost, avail);
+                buf.set_string(cx, cy, &truncated, theme.ghost_text_style().bg(bg));
             }
         }
 

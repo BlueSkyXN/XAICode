@@ -147,11 +147,6 @@ impl GrokAuth {
         }
     }
 
-    /// `true` when this auth can access managed MCP connectors.
-    pub fn is_managed_mcp_eligible(&self) -> bool {
-        self.is_xai_auth() || self.auth_mode == AuthMode::WebLogin
-    }
-
     /// Whether this credential can access `supported_in_api: false` models.
     ///
     /// Session logins (WebLogin, OIDC — including enterprise issuers) always
@@ -255,53 +250,11 @@ impl GrokAuth {
 
 pub(crate) type AuthStore = BTreeMap<String, GrokAuth>;
 
-/// User information from the cli-chat-proxy `GET /v1/user` endpoint.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct UserInfo {
-    pub(crate) user_id: String,
-    #[serde(default)]
-    pub(super) email: Option<String>,
-    #[serde(default)]
-    pub(super) first_name: Option<String>,
-    #[serde(default)]
-    pub(super) last_name: Option<String>,
-    #[serde(default)]
-    pub(super) profile_image_asset_id: Option<String>,
-    #[serde(default)]
-    pub(super) principal_type: Option<String>,
-    #[serde(default)]
-    pub(super) principal_id: Option<String>,
-    #[serde(default)]
-    pub(super) team_id: Option<String>,
-    #[serde(default)]
-    pub(super) team_name: Option<String>,
-    #[serde(default)]
-    pub(super) team_role: Option<String>,
-    #[serde(default)]
-    pub(super) organization_id: Option<String>,
-    #[serde(default)]
-    pub(super) organization_name: Option<String>,
-    #[serde(default)]
-    pub(super) organization_role: Option<String>,
-    #[serde(default)]
-    pub(super) user_blocked_reason: Option<String>,
-    #[serde(default)]
-    pub(super) team_blocked_reasons: Option<Vec<String>>,
-    #[serde(default)]
-    pub(super) coding_data_retention_opt_out: Option<bool>,
-    /// Live subscription tier from the backend (only present when
-    /// `?include=subscription` is passed to `/user`).
-    #[serde(default)]
-    pub(crate) subscription_tier: Option<String>,
-}
-
 /// Look up auth from the store by scope key.
 ///
-/// Legacy `WebLogin` tokens (from the pre-OIDC `grok login --legacy`
-/// flow) are skipped — they are validated via a per-request DB lookup
-/// server-side which fails at high volume.  Skipping them here forces
-/// affected users to re-authenticate via OIDC on next launch.
+/// Legacy `WebLogin` tokens are skipped.  The local build keeps the serialized
+/// variant only so old stores remain readable; account re-authentication is
+/// outside this runtime.
 pub fn lookup_auth(map: &AuthStore, scope: &str) -> Option<GrokAuth> {
     let auth = map.get(scope).cloned().or_else(|| {
         if scope == LEGACY_SCOPE {
@@ -447,43 +400,6 @@ mod tests {
         let mut map = AuthStore::new();
         map.insert("scope".into(), make_auth(AuthMode::ApiKey));
         assert!(lookup_auth(&map, "scope").is_some());
-    }
-
-    /// subscriptionTier present → deserializes to Some.
-    #[test]
-    fn user_info_subscription_tier_present() {
-        let json = r#"{
-            "userId": "u1",
-            "subscriptionTier": "SuperGrokPro"
-        }"#;
-        let info: UserInfo = serde_json::from_str(json).unwrap();
-        assert_eq!(info.subscription_tier.as_deref(), Some("SuperGrokPro"));
-    }
-
-    /// subscriptionTier absent → deserializes to None (backwards compat).
-    #[test]
-    fn user_info_subscription_tier_absent() {
-        let json = r#"{"userId": "u1"}"#;
-        let info: UserInfo = serde_json::from_str(json).unwrap();
-        assert!(info.subscription_tier.is_none());
-    }
-
-    /// subscriptionTier null → deserializes to None.
-    #[test]
-    fn user_info_subscription_tier_null() {
-        let json = r#"{"userId": "u1", "subscriptionTier": null}"#;
-        let info: UserInfo = serde_json::from_str(json).unwrap();
-        assert!(info.subscription_tier.is_none());
-    }
-
-    /// subscriptionTier empty string → deserializes to Some("").
-    /// The paywall poller treats this as "no subscription" (line 230:
-    /// `Some(tier) if !tier.is_empty()`) and keeps polling.
-    #[test]
-    fn user_info_subscription_tier_empty_string() {
-        let json = r#"{"userId": "u1", "subscriptionTier": ""}"#;
-        let info: UserInfo = serde_json::from_str(json).unwrap();
-        assert_eq!(info.subscription_tier.as_deref(), Some(""));
     }
 
     /// Pre-default auth.json (no coding_data_retention_opt_out key) must

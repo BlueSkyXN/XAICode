@@ -93,8 +93,6 @@ pub struct AgentBuilder {
     backend_search: bool,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     lsp: Option<std::sync::Arc<dyn xai_grok_tools::implementations::lsp::LspBackend>>,
-    image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
-    video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
     app_builder_deployer_config:
         xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig,
     write_file_enabled: bool,
@@ -234,8 +232,6 @@ impl AgentBuilder {
             backend_search: false,
             web_fetch_config: Default::default(),
             lsp: None,
-            image_gen_config: Default::default(),
-            video_gen_config: Default::default(),
             app_builder_deployer_config: Default::default(),
             write_file_enabled: true,
             subagents_enabled: false,
@@ -362,7 +358,9 @@ impl AgentBuilder {
     /// Mark this session as non-interactive (headless / SDK / stdio /
     /// generic-ACP). Suppresses prompt sections that only make sense when
     /// a human is typing into the TUI prompt input (e.g. the `! <command>`
-    /// shell-prefix tip and the `<user_guide>` TUI pointer).
+    /// shell-prefix tip and the `<user_guide>` TUI pointer), and stamps
+    /// `non_interactive` into the ask_user_question params so an unanswered
+    /// questionnaire returns no-operator text instead of "user declined".
     pub fn with_is_non_interactive(mut self, value: bool) -> Self {
         self.is_non_interactive = value;
         self
@@ -468,31 +466,21 @@ impl AgentBuilder {
         self.lsp = Some(handle);
         self
     }
-    /// Set the image generation configuration.
-    ///
-    /// When `Enabled`, an `ImageGenClient` is created and injected into
-    /// the ToolBridge's resources and the `image_gen` tool is registered,
-    /// allowing image generation via the xAI Imagine API with session
-    /// credentials. When `Disabled` (default), the tool is not registered.
+    /// Retained as a source-compatible no-op for the removed hosted image
+    /// generation runtime. Configuration fields remain carriers for old
+    /// config files, but no client or tool is constructed.
     pub fn with_image_gen_config(
         mut self,
-        config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
+        _config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     ) -> Self {
-        self.image_gen_config = config;
         self
     }
-    /// Set the video generation configuration.
-    ///
-    /// When `Enabled`, a `VideoGenClient` is created and injected into
-    /// the ToolBridge's resources and the `video_gen` tool is registered,
-    /// allowing video generation via the xAI Video Generation API with
-    /// session credentials. When `Disabled` (default), the tool is not
-    /// registered.
+    /// Retained as a source-compatible no-op for the removed hosted video
+    /// generation runtime.
     pub fn with_video_gen_config(
         mut self,
-        config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
+        _config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
     ) -> Self {
-        self.video_gen_config = config;
         self
     }
     /// Set the deploy service configuration.
@@ -736,24 +724,6 @@ impl AgentBuilder {
                     .tools
                     .push((&xai_grok_tools::implementations::grok_build::LspTool).into());
             }
-            if self.image_gen_config.image_gen_enabled() {
-                tool_config
-                    .tools
-                    .push((&xai_grok_tools::implementations::grok_build::ImageGenTool).into());
-            }
-            if self.image_gen_config.image_edit_enabled() {
-                tool_config
-                    .tools
-                    .push((&xai_grok_tools::implementations::grok_build::ImageEditTool).into());
-            }
-            if self.video_gen_config.is_enabled() {
-                tool_config
-                    .tools
-                    .push((&xai_grok_tools::implementations::grok_build::ImageToVideoTool).into());
-                tool_config.tools.push(
-                    (&xai_grok_tools::implementations::grok_build::ReferenceToVideoTool).into(),
-                );
-            }
             let has_write_tool = tool_config
                 .tools
                 .iter()
@@ -871,6 +841,11 @@ impl AgentBuilder {
                 &["GrokBuild:ask_user_question"],
                 ask_params,
             );
+        }
+        if self.is_non_interactive {
+            let mut ni = serde_json::Map::new();
+            ni.insert("non_interactive".into(), serde_json::Value::Bool(true));
+            merge_tool_params(&mut tool_config, &["GrokBuild:ask_user_question"], &ni);
         }
         if !definition.disallowed_tools.is_empty() {
             let before: std::collections::HashSet<String> =
@@ -1045,8 +1020,6 @@ impl AgentBuilder {
                 web_search_config: self.web_search_config,
                 web_fetch_config: self.web_fetch_config,
                 lsp: self.lsp,
-                image_gen_config: self.image_gen_config,
-                video_gen_config: self.video_gen_config,
                 app_builder_deployer_config: self.app_builder_deployer_config,
                 api_key_provider: self.api_key_provider,
                 auth_provider: None,
@@ -1820,6 +1793,33 @@ mod tests {
             .expect("finalize must insert Params for the injected ask_user_question");
         assert_eq!(applied.0.timeout_enabled, Some(false));
         assert_eq!(applied.0.timeout_secs, Some(5));
+        assert_eq!(applied.0.non_interactive, None);
+    }
+    /// A non-interactive build stamps `non_interactive: true` into the AUQ
+    /// params (session state, not user config) so cancel/timeout return the
+    /// no-operator text.
+    #[tokio::test]
+    async fn non_interactive_build_stamps_ask_user_question_params() {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionParams;
+        use xai_grok_tools::notification::ToolNotificationHandle;
+        use xai_grok_tools::types::resources::Params;
+        let agent = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(crate::config::AgentDefinition::default_grok_build())
+        .with_is_non_interactive(true)
+        .build()
+        .await
+        .expect("agent should build");
+        let applied = agent
+            .tool_bridge()
+            .read_resource::<Params<AskUserQuestionParams>>()
+            .await
+            .expect("finalize must insert Params for the injected ask_user_question");
+        assert_eq!(applied.0.non_interactive, Some(true));
     }
     async fn build_with_tools(tools: Vec<String>, disallowed: Vec<String>) -> crate::agent::Agent {
         use xai_grok_tools::computer::local::LocalTerminalBackend;

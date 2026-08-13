@@ -295,10 +295,6 @@ pub struct PagerLocalSnapshot {
     /// `[toolset.ask_user_question].timeout_enabled` mirror (effective TOML
     /// merge, like `show_tips`). `None` = unset in TOML → default `true`.
     pub ask_user_question_timeout_enabled: Option<bool>,
-    /// Live `voice_config.language` at snapshot time. Lets the modal show the
-    /// language actually in effect when `[ui].voice_stt_language` is unset but
-    /// an explicit `[voice].language` applies.
-    pub voice_stt_language: String,
     /// Mirrors `AgentView::scheduler_background_loops` — the value the shell
     /// pinned for THIS session — falling back to
     /// `AppView::scheduler_background_loops_seed` before the session response
@@ -327,31 +323,10 @@ impl Default for PagerLocalSnapshot {
             respect_manual_folds: crate::appearance::ScrollConfig::default().respect_manual_folds,
             auto_mode_gate: false,
             ask_user_question_timeout_enabled: None,
-            voice_stt_language: xai_grok_voice::STT_LANGUAGE_DEFAULT.to_string(),
             // Matches `resolve_scheduler_background_loops`'s default.
             scheduler_background_loops: true,
         }
     }
-}
-
-/// Canonicalize a raw voice-capture mode to a registry choice. Case-insensitive
-/// and trimmed; unknown/blank/`None` → `hold` (the default).
-pub fn canonical_voice_capture_mode(value: Option<&str>) -> &'static str {
-    let raw = value.unwrap_or_default().trim();
-    if raw.eq_ignore_ascii_case("toggle") {
-        "toggle"
-    } else {
-        "hold"
-    }
-}
-
-/// Canonicalize a raw voice STT language to a settings choice.
-///
-/// Delegates to [`xai_grok_voice::canonicalize_stt_language`] so the pager and
-/// the STT client share one catalog (official Grok STT languages + client-only
-/// `auto`). Unknown/blank/`None` → `en`.
-pub fn canonical_voice_stt_language(value: Option<&str>) -> &'static str {
-    xai_grok_voice::canonicalize_stt_language(value)
 }
 
 /// Canonicalize a raw hunk-tracker mode to a registry choice. Case-insensitive
@@ -414,8 +389,8 @@ impl SettingsRegistry {
     /// Build the default registry from `crate::settings::defs::default_settings()`.
     pub fn defaults() -> Self {
         let mut entries = crate::settings::defs::default_settings();
-        // Several upstream hosted controls (updater, account-data retention,
-        // and voice) are removed from shipped builds. Keep their legacy
+        // Several upstream hosted controls (updater, account-data retention)
+        // are removed from shipped builds. Keep their legacy
         // metadata/serde fields for config compatibility, but do not advertise
         // settings whose implementations no longer exist. Test builds retain
         // the catalog rows so the upstream registry contract remains
@@ -424,15 +399,11 @@ impl SettingsRegistry {
         entries.retain(|meta| {
             !matches!(
                 meta.key,
-                // Hosted updater, account-data retention, and voice rows have
+                // Hosted updater and account-data retention rows have
                 // no implementation in the clean local build.  Their backing
                 // fields stay deserializable for old config files, but the
                 // production settings UI must not offer dead controls.
-                "auto_update"
-                    | "coding_data_sharing"
-                    | "voice_keybind_enabled"
-                    | "voice_capture_mode"
-                    | "voice_stt_language"
+                "auto_update" | "coding_data_sharing"
             )
         });
         assert_unique_keys(&entries);
@@ -615,23 +586,6 @@ pub fn current_value_for(
         "screen_mode" => Some(SettingValue::Enum(canonical_screen_mode(
             ui.screen_mode.as_deref(),
         ))),
-        // SHELL — whether the Ctrl+Space / F8 chord is active; None → true.
-        "voice_keybind_enabled" => {
-            Some(SettingValue::Bool(ui.voice_keybind_enabled.unwrap_or(true)))
-        }
-        // SHELL — canonicalized from `[ui].voice_capture_mode`; None → "hold".
-        "voice_capture_mode" => Some(SettingValue::Enum(canonical_voice_capture_mode(
-            ui.voice_capture_mode.as_deref(),
-        ))),
-        // SHELL — canonicalized from `[ui].voice_stt_language`. When unset,
-        // fall back to the live `voice_config.language` (snapshot mirror) so
-        // an explicit `[voice].language` shows as the current choice instead
-        // of the registry default.
-        "voice_stt_language" => Some(SettingValue::Enum(canonical_voice_stt_language(Some(
-            ui.voice_stt_language
-                .as_deref()
-                .unwrap_or(&pager.voice_stt_language),
-        )))),
         // Theme: unknown disk values fall through to canonical default.
         // auto_dark/light additionally filter out "auto" (circular ref).
         "theme" => Some(SettingValue::Enum(
@@ -1052,38 +1006,6 @@ mod tests {
                     };
                     assert_eq!(*default, expected);
                 }
-                // voice_keybind_enabled: Option<bool>; None → true.
-                ("voice_keybind_enabled", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default,
-                        ui.voice_keybind_enabled.unwrap_or(true),
-                        "voice_keybind_enabled default drifts from UiConfig::default()",
-                    );
-                }
-                // voice_capture_mode: Option<String>; None → "hold".
-                ("voice_capture_mode", SettingKind::Enum { default, .. }) => {
-                    assert_eq!(
-                        ui.voice_capture_mode, None,
-                        "test assumes UiConfig::default().voice_capture_mode is None",
-                    );
-                    assert_eq!(
-                        *default,
-                        canonical_voice_capture_mode(ui.voice_capture_mode.as_deref()),
-                        "voice_capture_mode default drifts from UiConfig::default()",
-                    );
-                }
-                // voice_stt_language: Option<String>; None → "en".
-                ("voice_stt_language", SettingKind::Enum { default, .. }) => {
-                    assert_eq!(
-                        ui.voice_stt_language, None,
-                        "test assumes UiConfig::default().voice_stt_language is None",
-                    );
-                    assert_eq!(
-                        *default,
-                        canonical_voice_stt_language(ui.voice_stt_language.as_deref()),
-                        "voice_stt_language default drifts from UiConfig::default()",
-                    );
-                }
                 // hunk_tracker_mode: Option<String>; None → "agent_only".
                 ("hunk_tracker_mode", SettingKind::Enum { default, .. }) => {
                     assert_eq!(
@@ -1306,103 +1228,6 @@ mod tests {
         let ui = UiConfig::default();
         let pager = PagerLocalSnapshot::default();
         assert!(current_value_for("never-registered-key-xyzzy", &ui, &pager).is_none());
-    }
-
-    #[test]
-    fn canonical_voice_capture_mode_maps_unknowns_to_hold() {
-        assert_eq!(canonical_voice_capture_mode(Some("toggle")), "toggle");
-        assert_eq!(canonical_voice_capture_mode(Some("hold")), "hold");
-        // Case-insensitive + whitespace-tolerant.
-        assert_eq!(canonical_voice_capture_mode(Some("  TOGGLE ")), "toggle");
-        // Unknown / blank / None all fall back to the default `hold`.
-        assert_eq!(canonical_voice_capture_mode(Some("hold_send")), "hold");
-        assert_eq!(canonical_voice_capture_mode(Some("")), "hold");
-        assert_eq!(canonical_voice_capture_mode(None), "hold");
-    }
-
-    /// With the UI key unset, `current_value_for` shows the live language
-    /// (snapshot mirror of `voice_config.language` — e.g. an explicit
-    /// `[voice].language`); a set UI key wins.
-    #[test]
-    fn voice_stt_language_current_value_falls_back_to_live_config() {
-        let pager = PagerLocalSnapshot {
-            voice_stt_language: "es".into(),
-            ..Default::default()
-        };
-        let ui = UiConfig::default();
-        assert_eq!(
-            current_value_for("voice_stt_language", &ui, &pager),
-            Some(SettingValue::Enum("es")),
-        );
-        let ui_set = UiConfig {
-            voice_stt_language: Some("ja".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            current_value_for("voice_stt_language", &ui_set, &pager),
-            Some(SettingValue::Enum("ja")),
-        );
-    }
-
-    /// Spot-check the delegation to `xai_grok_voice::canonicalize_stt_language`
-    /// (exhaustive alias/locale coverage lives in the voice crate's tests).
-    #[test]
-    fn canonical_voice_stt_language_delegates_to_voice_crate() {
-        assert_eq!(canonical_voice_stt_language(Some("auto")), "auto");
-        assert_eq!(canonical_voice_stt_language(Some("tl")), "fil");
-        assert_eq!(canonical_voice_stt_language(None), "en");
-    }
-
-    /// Settings enum choices (minus client-only `auto`) must equal the voice
-    /// crate's official STT catalog — prevents offering unsupported codes or
-    /// omitting newly documented languages.
-    #[test]
-    fn voice_stt_language_settings_match_voice_crate_catalog() {
-        use std::collections::HashSet;
-
-        let reg = SettingsRegistry::defaults();
-        let meta = reg
-            .find("voice_stt_language")
-            .expect("voice_stt_language must be registered");
-        let SettingKind::Enum {
-            choices, default, ..
-        } = &meta.kind
-        else {
-            panic!("voice_stt_language must be Enum");
-        };
-        assert_eq!(*default, "en");
-
-        let mut setting_codes: HashSet<&str> = HashSet::new();
-        let mut saw_auto = false;
-        for c in choices.iter() {
-            if c.canonical == "auto" {
-                saw_auto = true;
-                assert_eq!(c.display, "System");
-                continue;
-            }
-            assert!(
-                setting_codes.insert(c.canonical),
-                "duplicate settings language code {}",
-                c.canonical
-            );
-            let lang = xai_grok_voice::stt_language_by_code(c.canonical)
-                .unwrap_or_else(|| panic!("settings offers unsupported STT code {}", c.canonical));
-            assert_eq!(
-                c.display, lang.name,
-                "display name for {} must match voice crate",
-                c.canonical
-            );
-        }
-        assert!(saw_auto, "settings must offer System (auto)");
-
-        let crate_codes: HashSet<&str> = xai_grok_voice::STT_LANGUAGES
-            .iter()
-            .map(|l| l.code)
-            .collect();
-        assert_eq!(
-            setting_codes, crate_codes,
-            "settings concrete languages must match xai_grok_voice::STT_LANGUAGES exactly"
-        );
     }
 
     #[test]

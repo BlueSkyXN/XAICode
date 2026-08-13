@@ -3,7 +3,7 @@
 use super::{
     ActivePane, AgentPane, AgentView, AgentViewLayout, BlockingCard, CtaPhase, EscStep,
     InlineMediaHitAreas, KeyOwner, MODE_BANNER_FADE_TICKS, PromptMode, collect_citation_links,
-    dropdown_items_width, record_dot_pulse, render_dropdown_chrome, supports_osc22,
+    dropdown_items_width, render_dropdown_chrome, supports_osc22,
 };
 use crate::actions::{ActionId, ActionRegistry};
 use crate::key;
@@ -32,22 +32,15 @@ use ratatui::widgets::Widget;
 use std::collections::HashSet;
 use std::time::Instant;
 /// AppView-owned per-frame inputs to [`AgentView::draw`] — state the agent
-/// view cannot see itself (the voice pipeline and app-level Esc ownership).
+/// view cannot see itself (app-level Esc ownership).
 /// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render
 /// fact extends this struct instead of every `draw` call site; tests take
 /// `Default` and override only what they exercise.
 #[derive(Default)]
-pub struct AppRenderParams<'a> {
-    /// Voice feature available (shows the mic affordances).
-    pub voice_available: bool,
-    /// Mic open and streaming on the active surface — drives the recording
-    /// row and the prompt voice overlay.
-    pub voice_listening: bool,
-    /// Interim transcript for the prompt overlay while dictating.
-    pub voice_interim: Option<&'a str>,
+pub struct AppRenderParams {
     /// App-level Esc ownership snapshot — single producer
-    /// `AppView::esc_owned_before_agent` (voice listening / cold-start,
-    /// focused dev tracing pane, cloud / import-Claude modals, dashboard
+    /// `AppView::esc_owned_before_agent` (focused dev tracing pane, cloud /
+    /// import-Claude modals, dashboard
     /// attached-agent popup). Feeds the hint path so the bar never
     /// advertises `Esc cancel` while an app-level owner would consume it.
     pub esc_owned_before_agent: bool,
@@ -865,15 +858,12 @@ impl AgentView {
         in_dashboard_overlay: bool,
         overlay_can_cycle: bool,
         link_spans_out: &mut Vec<xai_ratatui_inline::LinkSpan>,
-        app_params: AppRenderParams<'_>,
+        app_params: AppRenderParams,
     ) -> (
         Option<(u16, u16)>,
         Option<crate::terminal::overlay::PostFlush>,
     ) {
         let AppRenderParams {
-            voice_available,
-            voice_listening,
-            voice_interim,
             esc_owned_before_agent,
         } = app_params;
         self.scrollback.begin_frame();
@@ -1310,7 +1300,6 @@ impl AgentView {
         } else {
             1
         };
-        let voice_recording_height = if voice_listening { 1 } else { 0 };
         let _tool_usage_height = 0u16;
         let btw_height =
             crate::views::btw_overlay::btw_panel_height(self.btw_state.as_ref(), inner_width);
@@ -1344,7 +1333,6 @@ impl AgentView {
             follow_ups_height,
             0,
             prompt_gap,
-            voice_recording_height,
             1,
             compact,
         );
@@ -1420,7 +1408,6 @@ impl AgentView {
                         follow_ups_height,
                         0,
                         prompt_gap,
-                        voice_recording_height,
                         1,
                         compact,
                     );
@@ -2364,55 +2351,6 @@ impl AgentView {
             }
         }
         self.draw_plugin_cta(buf, layout.plugin_cta, &theme);
-        if voice_listening && layout.voice_recording.height > 0 && layout.voice_recording.width > 0
-        {
-            let rec_area = layout.voice_recording;
-            let bg = theme.bg_base;
-            for col in 0..rec_area.width {
-                if let Some(cell) = buf.cell_mut((rec_area.x + col, rec_area.y)) {
-                    cell.set_char(' ');
-                    cell.fg = bg;
-                    cell.bg = bg;
-                }
-            }
-            let content_x = rec_area.x + layout_cfg.block_pad_left;
-            let (filled, brightness) = record_dot_pulse();
-            let dot = crate::glyphs::record_dot(filled);
-            let dot_color = crate::render::color::blend_color(bg, theme.accent_error, brightness)
-                .unwrap_or(theme.accent_error);
-            buf.set_string(
-                content_x,
-                rec_area.y,
-                dot,
-                Style::default().fg(dot_color).bg(bg),
-            );
-            buf.set_string(
-                content_x + 2,
-                rec_area.y,
-                "Recording",
-                Style::default().fg(theme.accent_error).bg(bg),
-            );
-            let stop_str = "[stop]";
-            let stop_w = unicode_width::UnicodeWidthStr::width(stop_str) as u16;
-            let stop_x = rec_area.x
-                + rec_area
-                    .width
-                    .saturating_sub(layout_cfg.block_pad_right + stop_w);
-            let stop_fg = if self.hit_voice_stop_button.hovered {
-                theme.accent_error
-            } else {
-                theme.gray
-            };
-            buf.set_string(
-                stop_x,
-                rec_area.y,
-                stop_str,
-                Style::default().fg(stop_fg).bg(bg),
-            );
-            self.hit_voice_stop_button.rect = Some(Rect::new(stop_x, rec_area.y, stop_w, 1));
-        } else {
-            self.hit_voice_stop_button.clear();
-        }
         self.follow_up_chips = match self.follow_ups.as_ref() {
             Some(fu) => agent::render_follow_ups(
                 layout.follow_ups,
@@ -2569,14 +2507,9 @@ impl AgentView {
                         width: iarea.text_w,
                         height: prompt_h,
                     };
-                    let prompt_result_inner = self.prompt.draw(
-                        buf,
-                        prompt_draw_area,
-                        None,
-                        &perm_followup_style,
-                        None,
-                        None,
-                    );
+                    let prompt_result_inner =
+                        self.prompt
+                            .draw(buf, prompt_draw_area, None, &perm_followup_style, None);
                     if let Some(pos) = prompt_result_inner.cursor_pos {
                         prompt_cursor_pos = Some(pos);
                     }
@@ -2695,7 +2628,6 @@ impl AgentView {
                     Some(layout.scrollback),
                     &style,
                     outlined.then_some(&PromptInfo::default()),
-                    None,
                 );
                 prompt_cursor_pos = result.cursor_pos;
                 self.inline_prompt_area = Some(input_area);
@@ -2788,7 +2720,6 @@ impl AgentView {
                     prompt_draw_area,
                     Some(layout.scrollback),
                     &text_style,
-                    None,
                     None,
                 );
                 prompt_cursor_pos = prompt_result_inner.cursor_pos;
@@ -2983,21 +2914,12 @@ impl AgentView {
             } else {
                 None
             };
-            let voice_overlay = if voice_available && (voice_listening || voice_interim.is_some()) {
-                Some(crate::views::prompt_widget::VoicePromptOverlay {
-                    interim: voice_interim,
-                    color: theme.accent_running,
-                })
-            } else {
-                None
-            };
             let prompt_result_inner = self.prompt.draw(
                 buf,
                 layout.prompt,
                 Some(layout.scrollback),
                 &prompt_style,
                 Some(&info),
-                voice_overlay,
             );
             if let Some((s, ovr)) = saved_scroll {
                 self.prompt.textarea.set_scroll_override(ovr);
@@ -3410,8 +3332,6 @@ impl AgentView {
                 .is_some_and(|p| p.focus != PlanApprovalFocus::Preview);
             let overlay_bottom = if layout.turn_status.height > 0 {
                 layout.turn_status.y
-            } else if layout.voice_recording.height > 0 {
-                layout.voice_recording.y
             } else {
                 layout.prompt.y
             };
@@ -4422,16 +4342,6 @@ impl AgentView {
                         })
                     })
                     .collect();
-                self.push_promo_cta_link_span(
-                    link_spans_out,
-                    banner_announcements,
-                    hidden_announcement_ids,
-                );
-                self.push_upgrade_cta_link_span(
-                    link_spans_out,
-                    banner_announcements,
-                    hidden_announcement_ids,
-                );
             }
         }
         let on_link = self.hovered_link_idx.is_some();
@@ -4555,82 +4465,6 @@ mod selection_state_tests {
         agent.clear_scrollback_selection_state();
         assert!(agent.last_scrollback_selection_model.ranges.is_empty());
         assert!(agent.last_scrollback_selection_boundaries.is_empty());
-    }
-}
-#[cfg(test)]
-mod voice_recording_overlay_tests {
-    use super::super::test_fixtures::make_agent;
-    use super::super::test_fixtures::make_plan_approval_view_state;
-    use super::AgentView;
-    use crate::actions::ActionRegistry;
-    use crate::app::bundle::BundleState;
-    use crate::scrollback::render::ScratchBuffer;
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
-    /// Agent with the plan-approval view (and its line-viewer overlay) open.
-    fn plan_approval_agent() -> AgentView {
-        let mut agent = make_agent();
-        agent.plan_approval_view = Some(make_plan_approval_view_state());
-        agent.reopen_plan_approval();
-        assert!(agent.line_viewer.is_some(), "approval must open the viewer");
-        agent
-    }
-    /// Render `agent` with the given voice state and return the buffer text.
-    fn render_text(agent: &mut AgentView, listening: bool) -> String {
-        let reg = ActionRegistry::defaults();
-        let area = Rect::new(0, 0, 100, 40);
-        let mut buf = Buffer::empty(area);
-        let mut scratch = ScratchBuffer::new();
-        agent.draw(
-            area,
-            &mut buf,
-            &reg,
-            &mut scratch,
-            None,
-            false,
-            crate::app::agent_view::BannerSlotParams::none(),
-            &BundleState::default(),
-            false,
-            false,
-            &mut Vec::new(),
-            super::AppRenderParams {
-                voice_available: listening,
-                voice_listening: listening,
-                ..Default::default()
-            },
-        );
-        (0..area.height)
-            .map(|y| {
-                (0..area.width)
-                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
-                    .collect::<String>()
-                    + "\n"
-            })
-            .collect()
-    }
-    /// The plan approval's line-viewer overlay used to paint over the
-    /// `voice_recording` row, leaving a live mic (Ctrl+Space / F8 still work
-    /// there) with no visible "Recording" indicator. The overlay must stop
-    /// above the record indicator row.
-    #[test]
-    fn recording_row_visible_while_plan_approval_open() {
-        let mut agent = plan_approval_agent();
-        let text = render_text(&mut agent, true);
-        assert!(
-            text.contains("Recording"),
-            "record indicator must stay visible under the plan approval viewer:\n{text}"
-        );
-    }
-    /// While voice is idle no indicator row exists, so the overlay keeps
-    /// reaching the prompt as before.
-    #[test]
-    fn no_recording_row_when_not_listening_in_plan_approval() {
-        let mut agent = plan_approval_agent();
-        let text = render_text(&mut agent, false);
-        assert!(
-            !text.contains("Recording"),
-            "no record indicator when voice is idle:\n{text}"
-        );
     }
 }
 #[cfg(test)]

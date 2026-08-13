@@ -644,7 +644,6 @@ fn render_list(
             badge: &badge,
             badge_color: glyph_style.fg,
             collapsible: false,
-            underline_last_desc: false,
         };
         let rendered = render_picker_row(
             buf,

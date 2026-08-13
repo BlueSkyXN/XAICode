@@ -207,7 +207,6 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             .prompt
             .set_contextual_hints(app.contextual_hints.undo, app.contextual_hints.plan_mode);
         agent.set_session_recap_available(app.session_recap_available);
-        agent.set_voice_mode_available(app.voice_mode_enabled);
         agent.apply_app_scoped_gates(
             app.sharing_enabled,
             app.usage_visible,
@@ -421,6 +420,10 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
         agent.session.restore_degree = restore_degree;
         agent.session.cwd = session_cwd.clone();
         agent.session.is_worktree = true;
+        agent.current_branch = None;
+        agent.main_repo = None;
+        agent.is_worktree = true;
+        crate::git_info::populate_from_cwd_async(session_cwd.clone());
         app.restore_code = None;
         agent.prompt.file_search.retarget(&session_cwd);
         agent.scrollback.push_block(RenderBlock::system(format!(

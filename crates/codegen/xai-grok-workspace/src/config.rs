@@ -743,9 +743,8 @@ pub struct WorkspaceConfig {
     /// and disabled/enabled lists. Stored on `WorkspaceShared` for
     /// `discover_plugins` calls. Defaults to empty.
     pub plugin_discovery_config: crate::discovery::PluginDiscoveryConfig,
-    /// Optional server configuration. When `Some`, the workspace
-    /// can connect to the server after construction via
-    /// [`WorkspaceHandle::connect_hub`](crate::handle::WorkspaceHandle::connect_hub).
+    /// Optional compatibility configuration retained for persisted and wire
+    /// representations. Hosted server connection is no longer composed here.
     pub hub_config: Option<HubConfig>,
     /// Auth provider for xAI service calls made from workspace-scoped code.
     /// `None` for workspaces that do not configure service auth.

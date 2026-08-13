@@ -1,6 +1,5 @@
-//! Canonical wire types for hub-proxied `workspace.*` RPC methods,
-//! shared by the server (hub_server), the shell proxy client
-//! (`WorkspaceOps`), and clients that cannot depend on
+//! Canonical wire types for `workspace.*` RPC methods,
+//! shared by local protocol carriers and clients that cannot depend on
 //! `xai-grok-workspace`. Types not yet migrated here live next to their
 //! `WorkspaceOp` impls in that crate; each type has exactly one
 //! [`WorkspaceRpc`] impl. [`RpcError`]-code-to-error-enum mapping is

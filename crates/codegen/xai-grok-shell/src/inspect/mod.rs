@@ -936,11 +936,8 @@ fn list_mcp_servers(
     use xai_grok_workspace::permission::resolution;
 
     let all_on = xai_grok_tools::types::compat::CompatConfig::default();
-    let sourced = crate::session::managed_mcp::merge_managed_mcp_servers_sourced(
-        cwd,
-        Some(plugin_registry),
-        &all_on,
-    );
+    let sourced =
+        crate::session::mcp_sources::merge_mcp_servers_sourced(cwd, Some(plugin_registry), &all_on);
     let allowlist = &resolution::managed_settings().mcp_allowlist;
 
     sourced
@@ -961,7 +958,7 @@ fn list_mcp_servers(
                     _ => ("unknown".to_string(), "unknown", String::new()),
                 };
             let disabled_reason = (!allowlist.is_server_allowed(&server)).then(|| {
-                crate::session::managed_mcp::McpDisabledReason::for_blocked_server(
+                crate::session::mcp_sources::McpDisabledReason::for_blocked_server(
                     allowlist, &server,
                 )
                 .to_string()

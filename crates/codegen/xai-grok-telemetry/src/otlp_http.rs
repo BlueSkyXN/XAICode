@@ -1,5 +1,5 @@
 //! Shared construction of the blocking `reqwest` client used by the OTLP
-//! HTTP exporters (spans in `otel_layer`, logs/metrics in `external`).
+//! HTTP transport for the generic external logs/metrics exporters.
 //!
 //! This uses the workspace `reqwest` 0.12 (`rustls-tls`, embedded webpki
 //! roots) rather than reqwest 0.13. reqwest 0.13's blocking client runs its

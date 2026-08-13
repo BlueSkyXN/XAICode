@@ -6,12 +6,9 @@
 //! 1. **ReloadFromDisk** — re-read `auth.json` under a file lock; if the
 //!    on-disk token differs from the rejected one, accept it (another
 //!    process may have refreshed).
-//! 2. **RefreshFromAuthority** — run the appropriate refresh chain
-//!    (OIDC token refresh, external binary, etc.) based on `TokenType`,
-//!    unless the live token was minted moments ago (fresh-mint guard).
-//! 3. **DevboxRecovery** — on devboxes, purge `auth.json` and mint fresh
-//!    OIDC credentials.
-//! 4. **Done** — all recovery strategies exhausted.
+//! 2. **RefreshFromAuthority** — run the provider-neutral external refresh
+//!    chain, unless the live token was minted moments ago (fresh-mint guard).
+//! 3. **Done** — all local recovery strategies exhausted.
 
 use std::sync::Arc;
 
@@ -39,7 +36,7 @@ pub(crate) fn manual_auth_reason(err: &AuthError) -> Option<ManualAuthReason> {
         AuthError::RecoveryExhausted => R::RecoveryExhausted,
         AuthError::TokenExpiredNoRefresh => R::TokenExpiredNoRefresh,
         AuthError::PinnedTeamMismatch { .. } => R::WrongTeam,
-        // API-key lockouts are out of scope: this KPI tracks OIDC refresh
+        // API-key lockouts are out of scope: this KPI tracks provider refresh
         // failures forcing a re-login, not an admin disabling API-key auth.
         AuthError::ApiKeyAuthDisabled
         | AuthError::Refresh(RefreshTokenError::Transient(_))
@@ -88,12 +85,10 @@ impl RecoverySource {
     }
 }
 
-/// Identity of the rejected credential for `manual_auth`, captured from
-/// the rejected bearer (not live `inner`) so attribution is correct even after a
-/// `WrongTeam`/cleared-credential failure.
+/// Rejected credential metadata for `manual_auth`, captured from the rejected
+/// bearer rather than live `inner` so debounce remains correct after a
+/// `WrongTeam`/cleared-credential failure. No account identity is retained.
 pub(crate) struct RejectedAuth {
-    /// `user_id`, when known (empty ids collapse to `None`).
-    principal: Option<String>,
     token_kind: AuthTokenKind,
     /// Full rejected bearer; the debounce key. Uses the whole token (not a
     /// suffix) so it matches the credential identity the permanent-failure
@@ -104,15 +99,9 @@ pub(crate) struct RejectedAuth {
 impl RejectedAuth {
     pub(crate) fn capture(auth: Option<&GrokAuth>) -> Self {
         Self {
-            principal: auth.map(|a| a.user_id.clone()).filter(|id| !id.is_empty()),
             token_kind: TokenType::from_auth(auth).telemetry_kind(),
             rejected_token_id: auth.map(|a| a.key.clone()).unwrap_or_default(),
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn principal_for_test(&self) -> Option<&str> {
-        self.principal.as_deref()
     }
 
     #[cfg(test)]
@@ -177,7 +166,6 @@ impl ManualAuthTracker {
             reason,
             trigger,
             token_kind: snapshot.token_kind,
-            principal: snapshot.principal.clone(),
         };
         #[cfg(test)]
         {
@@ -209,10 +197,8 @@ impl ManualAuthTracker {
 enum RecoveryStep {
     /// Re-read auth.json from disk (file-locked).
     ReloadFromDisk,
-    /// Refresh via the authority (OIDC, external binary, etc.).
+    /// Refresh via the configured external authority.
     RefreshFromAuthority,
-    /// On devboxes: purge auth.json and mint fresh OIDC credentials.
-    DevboxRecovery,
     /// All strategies exhausted.
     Done,
 }
@@ -224,12 +210,11 @@ pub(crate) struct UnauthorizedRecovery {
     rejected_token: String,
     /// Current step in the recovery sequence.
     step: RecoveryStep,
-    /// Error from `RefreshFromAuthority`, propagated as fallback when
-    /// devbox recovery doesn't apply.
+    /// Error from `RefreshFromAuthority`, propagated when no local recovery
+    /// strategy remains.
     authority_error: Option<AuthError>,
-    /// Whether the last authority failure was transient. Kept past the
-    /// `authority_error` handoff so exhaustion preserves the
-    /// transient/permanent axis (see the `Done` arm).
+    /// Preserve the transient/permanent axis after the first authority error
+    /// has been returned and removed from `authority_error`.
     authority_was_transient: bool,
     /// `Some` iff this recovery is user-facing — so a terminal failure emits.
     emit: Option<ManualAuthEmit>,
@@ -259,7 +244,7 @@ impl UnauthorizedRecovery {
     }
 
     /// Attempt the next recovery step. Walks
-    /// `ReloadFromDisk -> RefreshFromAuthority -> DevboxRecovery -> Done`.
+    /// `ReloadFromDisk -> RefreshFromAuthority -> Done`.
     /// `token_type` span field is recorded lazily via
     /// `Span::is_disabled()` to avoid the lock when tracing is off.
     #[tracing::instrument(
@@ -267,6 +252,15 @@ impl UnauthorizedRecovery {
         fields(step = ?self.step, token_type = tracing::field::Empty),
     )]
     pub(crate) async fn next(&mut self) -> Result<GrokAuth, AuthError> {
+        // xAI account sessions are compatibility data only in the local build.
+        // Do not adopt auth.json or invoke an account refresh from a 401 path;
+        // operator-managed external providers remain supported.
+        if matches!(
+            self.auth_manager.token_type(),
+            TokenType::LegacySession | TokenType::OidcSession
+        ) {
+            return Err(AuthError::NotLoggedIn);
+        }
         let span = tracing::Span::current();
         if !span.is_disabled() {
             // Only acquire the inner-lock when tracing actually
@@ -310,7 +304,7 @@ impl UnauthorizedRecovery {
                     }
                 }
                 RecoveryStep::RefreshFromAuthority => {
-                    self.step = RecoveryStep::DevboxRecovery;
+                    self.step = RecoveryStep::Done;
                     match self.try_refresh_from_authority().await {
                         Ok(auth) => return Ok(auth),
                         Err(e) => {
@@ -320,29 +314,10 @@ impl UnauthorizedRecovery {
                         }
                     }
                 }
-                RecoveryStep::DevboxRecovery => {
-                    self.step = RecoveryStep::Done;
-                    // preferred_method=api_key forbids automatic OIDC mint.
-                    if !self.auth_manager.grok_com_config().blocks_automatic_oidc()
-                        && self.auth_manager.is_devbox_environment()
-                        && let Ok(auth) = self
-                            .auth_manager
-                            .try_devbox_recovery(Some(&self.rejected_token))
-                            .await
-                    {
-                        return Ok(auth);
-                    }
-                    return Err(self
-                        .authority_error
-                        .take()
-                        .unwrap_or(AuthError::RecoveryExhausted));
-                }
                 RecoveryStep::Done => {
-                    // Exhaustion after a *transient* authority failure stays
-                    // transient: `RecoveryExhausted` here would count a network
-                    // blip as a forced re-login (`manual_auth`) and cancel the
-                    // relay instead of letting it reconnect.
-                    return Err(if self.authority_was_transient {
+                    return Err(if let Some(error) = self.authority_error.take() {
+                        error
+                    } else if self.authority_was_transient {
                         AuthError::transient("recovery exhausted after transient refresh failure")
                     } else {
                         AuthError::RecoveryExhausted
@@ -355,6 +330,9 @@ impl UnauthorizedRecovery {
     /// Re-read `auth.json` from disk. Accept the token only if it differs
     /// from the one that was rejected.
     async fn try_reload_from_disk(&self) -> Option<GrokAuth> {
+        if !self.auth_manager.auth_file_access_allowed() {
+            return None;
+        }
         let _lock = self
             .auth_manager
             .try_lock_auth_file_async(crate::auth::manager::AUTH_LOCK_TIMEOUT)
@@ -445,10 +423,11 @@ impl UnauthorizedRecovery {
     ///
     /// Per-variant outcome:
     ///
-    /// - **OidcSession / ExternalBinary**: full refresh chain via the
-    ///   authority, unless the live token is inside the fresh-mint guard
-    ///   window ([`Self::fresh_mint_guard`]).
-    /// - **LegacySession / ApiKey**: no refresh authority for these
+    /// - **ExternalBinary**: full refresh chain via the configured provider,
+    ///   unless the live token is inside the fresh-mint guard window
+    ///   ([`Self::fresh_mint_guard`]).
+    /// - **LegacySession / OidcSession / ApiKey**: no refresh authority for
+    ///   these
     ///   types. We've already tried `ReloadFromDisk` (the previous
     ///   recovery step), so the server's 401 stands. Surface
     ///   [`AuthError::ServerRejectedNoRecovery`] -- *not*
@@ -461,7 +440,7 @@ impl UnauthorizedRecovery {
     async fn try_refresh_from_authority(&self) -> Result<GrokAuth, AuthError> {
         let tt = self.auth_manager.token_type();
         match tt {
-            TokenType::OidcSession | TokenType::ExternalBinary => {
+            TokenType::ExternalBinary => {
                 if let Some(auth) = self.fresh_mint_guard() {
                     return Ok(auth);
                 }
@@ -494,7 +473,7 @@ impl UnauthorizedRecovery {
                 }
                 result
             }
-            TokenType::LegacySession | TokenType::ApiKey => {
+            TokenType::LegacySession | TokenType::OidcSession | TokenType::ApiKey => {
                 xai_grok_telemetry::unified_log::warn(
                     "auth recovery: no refresh authority for token type",
                     None,
@@ -553,7 +532,7 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             RefreshOutcome::Success(Box::new(GrokAuth {
                 key: "fresh-from-authority".into(),
-                auth_mode: AuthMode::Oidc,
+                auth_mode: AuthMode::External,
                 refresh_token: Some("rt-new".into()),
                 expires_at: Some(Utc::now() + Duration::hours(1)),
                 ..GrokAuth::test_default()
@@ -575,7 +554,10 @@ mod tests {
 
     fn mgr() -> (tempfile::TempDir, Arc<AuthManager>) {
         let dir = tempfile::tempdir().unwrap();
-        let m = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+        let m = Arc::new(AuthManager::new_with_auth_file_access(
+            dir.path(),
+            GrokComConfig::default(),
+        ));
         (dir, m)
     }
 
@@ -595,9 +577,9 @@ mod tests {
     // -- TokenType dispatch matrix ----------------------------------------
 
     #[tokio::test]
-    async fn dispatch_oidc_session_uses_refresh_chain() {
+    async fn dispatch_external_binary_with_refresh_token_uses_refresh_chain() {
         let (_d, m) = mgr();
-        seed(&m, AuthMode::Oidc, Some("rt"));
+        seed(&m, AuthMode::External, Some("rt"));
         let calls = Arc::new(AtomicU32::new(0));
         m.set_refresher(Arc::new(OkRefresher {
             calls: calls.clone(),
@@ -655,7 +637,7 @@ mod tests {
     #[tokio::test]
     async fn fresh_mint_guard_skips_idp_for_freshly_minted_token() {
         let (_d, m) = mgr();
-        seed_valid(&m, AuthMode::Oidc, Duration::seconds(10));
+        seed_valid(&m, AuthMode::External, Duration::seconds(10));
         let (result, calls) = recover_with_ok_refresher(&m).await;
         assert_eq!(
             result.expect("guard returns the live token").key,
@@ -680,7 +662,7 @@ mod tests {
     async fn fresh_mint_guard_treats_small_negative_age_as_fresh() {
         // Clock stepped back slightly since mint (NTP nudge).
         let (_d, m) = mgr();
-        seed_valid(&m, AuthMode::Oidc, Duration::seconds(-60));
+        seed_valid(&m, AuthMode::External, Duration::seconds(-60));
         let (result, calls) = recover_with_ok_refresher(&m).await;
         assert_eq!(
             result.expect("guard returns the live token").key,
@@ -694,7 +676,7 @@ mod tests {
         // A large backwards clock step must not wedge recovery for the whole
         // step: outside the ±window the guard stands down.
         let (_d, m) = mgr();
-        seed_valid(&m, AuthMode::Oidc, Duration::hours(-1));
+        seed_valid(&m, AuthMode::External, Duration::hours(-1));
         let (result, calls) = recover_with_ok_refresher(&m).await;
         assert_eq!(
             result.expect("recovery should succeed").key,
@@ -706,7 +688,7 @@ mod tests {
     #[tokio::test]
     async fn fresh_mint_guard_lets_old_token_refresh() {
         let (_d, m) = mgr();
-        seed_valid(&m, AuthMode::Oidc, Duration::minutes(10));
+        seed_valid(&m, AuthMode::External, Duration::minutes(10));
         let (result, calls) = recover_with_ok_refresher(&m).await;
         assert_eq!(
             result.expect("recovery should succeed").key,
@@ -724,7 +706,7 @@ mod tests {
         // verdict is cached for it — mirrors `auth()`'s wire-valid grace arm;
         // the verdict re-applies once the guard window passes.
         let (_d, m) = mgr();
-        seed_valid(&m, AuthMode::Oidc, Duration::seconds(10));
+        seed_valid(&m, AuthMode::External, Duration::seconds(10));
         m.record_permanent_failure(
             "rejected-tok".into(),
             RefreshTokenFailedReason::RefreshTokenRejected.into(),
@@ -740,69 +722,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_mint_guard_never_returns_policy_hidden_token() {
-        // Wrong-team fresh token: `current()` hides it (vet_cached), so the
-        // guard must fall through to a normal refresh — fail closed.
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = GrokComConfig {
-            force_login_team_uuid: Some(crate::auth::config::ForceLoginTeam::Single(
-                "team-good".into(),
-            )),
-            ..GrokComConfig::default()
-        };
-        let m = Arc::new(AuthManager::new(dir.path(), cfg));
-        m.hot_swap(GrokAuth {
-            key: team_jwt("team-wrong"),
-            auth_mode: AuthMode::Oidc,
-            refresh_token: Some("rt".into()),
-            create_time: Utc::now(),
-            expires_at: Some(Utc::now() + Duration::hours(1)),
-            ..GrokAuth::test_default()
-        });
-        let calls = Arc::new(AtomicU32::new(0));
-        m.set_refresher(Arc::new(OkRefresher {
-            calls: calls.clone(),
-        }));
-
-        let mut rec = m.unauthorized_recovery(rejected_cred(), RecoverySource::Background);
-        let result = rec.next().await;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "hidden token must not satisfy the guard"
-        );
-        if let Ok(auth) = result {
-            assert_ne!(
-                auth.key,
-                team_jwt("team-wrong"),
-                "wrong-team token must never be returned"
-            );
-        }
-    }
-
-    #[tokio::test]
     async fn dispatch_legacy_session_returns_server_rejected_no_recovery() {
         let (_d, m) = mgr();
-        // WebLogin (no refresh_token) -> LegacySession.
+        // Legacy account credentials are not active in this build.
         seed(&m, AuthMode::WebLogin, None);
 
         let mut rec = m.unauthorized_recovery(rejected_cred(), RecoverySource::Background);
         let err = rec.next().await.unwrap_err();
         assert!(
-            matches!(err, AuthError::ServerRejectedNoRecovery),
-            "LegacySession recovery should surface ServerRejectedNoRecovery, got {err:?}",
+            matches!(err, AuthError::NotLoggedIn),
+            "LegacySession recovery should fail closed, got {err:?}",
         );
-    }
-
-    #[tokio::test]
-    async fn dispatch_oidc_without_refresh_token_returns_server_rejected_no_recovery() {
-        // Oidc without refresh_token classifies as LegacySession.
-        let (_d, m) = mgr();
-        seed(&m, AuthMode::Oidc, None);
-
-        let mut rec = m.unauthorized_recovery(rejected_cred(), RecoverySource::Background);
-        let err = rec.next().await.unwrap_err();
-        assert!(matches!(err, AuthError::ServerRejectedNoRecovery));
     }
 
     #[tokio::test]
@@ -837,13 +767,13 @@ mod tests {
     #[tokio::test]
     async fn reload_from_disk_picks_up_different_token() {
         let (dir, m) = mgr();
-        seed(&m, AuthMode::Oidc, Some("rt"));
+        seed(&m, AuthMode::External, Some("rt"));
 
         // Sibling process wrote a different valid token to disk.
         let scope = m.grok_com_config().auth_scope();
         let fresh = GrokAuth {
             key: "fresh-from-disk".into(),
-            auth_mode: AuthMode::Oidc,
+            auth_mode: AuthMode::External,
             refresh_token: Some("rt-new".into()),
             expires_at: Some(Utc::now() + Duration::hours(1)),
             ..GrokAuth::test_default()
@@ -863,13 +793,13 @@ mod tests {
     #[tokio::test]
     async fn reload_from_disk_skips_same_token_then_proceeds_to_authority() {
         let (dir, m) = mgr();
-        seed(&m, AuthMode::Oidc, Some("rt"));
+        seed(&m, AuthMode::External, Some("rt"));
 
         // Disk has the SAME token that was rejected -- skip, fall through.
         let scope = m.grok_com_config().auth_scope();
         let same = GrokAuth {
             key: "rejected-tok".into(),
-            auth_mode: AuthMode::Oidc,
+            auth_mode: AuthMode::External,
             refresh_token: Some("rt".into()),
             expires_at: Some(Utc::now() + Duration::hours(1)),
             ..GrokAuth::test_default()
@@ -901,14 +831,10 @@ mod tests {
     #[tokio::test]
     async fn next_after_done_returns_recovery_exhausted() {
         let (_d, m) = mgr();
-        seed(&m, AuthMode::Oidc, Some("rt"));
+        seed(&m, AuthMode::External, Some("rt"));
         m.set_refresher(Arc::new(OkRefresher {
             calls: Arc::new(AtomicU32::new(0)),
         }));
-
-        // Pin non-devbox so DevboxRecovery can't adopt the seeded token (CI runs
-        // in K8s pods where is_devbox_environment() is true).
-        m.set_devbox_env_for_test(false);
 
         let mut rec = m.unauthorized_recovery(rejected_cred(), RecoverySource::Background);
         let _ = rec.next().await.unwrap();
@@ -942,10 +868,8 @@ mod tests {
         }
 
         let (_d, m) = mgr();
-        seed(&m, AuthMode::Oidc, Some("rt"));
+        seed(&m, AuthMode::External, Some("rt"));
         m.set_refresher(Arc::new(TransientFailRefresher));
-        m.set_devbox_env_for_test(false);
-
         let mut rec = m.unauthorized_recovery(rejected_cred(), RecoverySource::Turn);
         // First next(): the authority's transient error propagates as-is.
         let first = rec.next().await.unwrap_err();
@@ -984,7 +908,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_authority_short_circuits_on_cached_permanent_failure() {
         let (_d, m) = mgr();
-        seed(&m, AuthMode::Oidc, Some("rt"));
+        seed(&m, AuthMode::External, Some("rt"));
         // Pre-record a permanent failure scoped to the seeded credential.
         m.record_permanent_failure(
             "rejected-tok".into(),
@@ -1017,12 +941,12 @@ mod tests {
     #[tokio::test]
     async fn reload_from_disk_rejects_expired_different_token() {
         let (dir, m) = mgr();
-        seed(&m, AuthMode::Oidc, Some("rt"));
+        seed(&m, AuthMode::External, Some("rt"));
 
         let scope = m.grok_com_config().auth_scope();
         let expired_different = GrokAuth {
             key: "different-but-expired".into(),
-            auth_mode: AuthMode::Oidc,
+            auth_mode: AuthMode::External,
             refresh_token: Some("rt-new".into()),
             expires_at: Some(Utc::now() - Duration::hours(1)),
             ..GrokAuth::test_default()
@@ -1054,7 +978,7 @@ mod tests {
         let tracker = Arc::new(ManualAuthTracker::default());
         let auth = GrokAuth {
             key: "rejected".into(),
-            auth_mode: AuthMode::Oidc,
+            auth_mode: AuthMode::External,
             refresh_token: Some("rt".into()),
             user_id: "user-1".into(),
             ..GrokAuth::test_default()
@@ -1079,66 +1003,6 @@ mod tests {
             tracker.emit_count_for_test(),
             1,
             "concurrent records on one rejected credential must emit exactly once",
-        );
-    }
-
-    // -- force_login_team_uuid pin enforced on the 401-recovery path -------
-
-    fn ensure_crypto_provider() {
-        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
-    }
-
-    fn team_jwt(principal_id: &str) -> String {
-        ensure_crypto_provider();
-        jsonwebtoken::encode(
-            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
-            &serde_json::json!({
-                "sub": "user-1",
-                "principal_type": "Team",
-                "principal_id": principal_id,
-                "exp": 9999999999u64,
-            }),
-            &jsonwebtoken::EncodingKey::from_secret(b"test-secret"),
-        )
-        .unwrap()
-    }
-
-    /// A sibling writes a wrong-team token to disk; 401 recovery (relay path)
-    /// must reject + clear it at `next()`, not hand it back as a bearer.
-    #[tokio::test]
-    async fn recovery_rejects_wrong_team_adopted_disk_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = GrokComConfig {
-            force_login_team_uuid: Some(crate::auth::config::ForceLoginTeam::Single(
-                "team-good".into(),
-            )),
-            ..GrokComConfig::default()
-        };
-        let scope = cfg.auth_scope();
-        let m = Arc::new(AuthManager::new(dir.path(), cfg));
-
-        // In-memory: the rejected (expired) session that triggered recovery.
-        seed(&m, AuthMode::Oidc, Some("rt"));
-
-        // Disk: a different, non-expired, *wrong-team* token a sibling wrote.
-        let mut store = read_auth_json(&dir.path().join("auth.json")).unwrap_or_default();
-        store.insert(
-            scope,
-            GrokAuth {
-                key: team_jwt("team-wrong"),
-                auth_mode: AuthMode::Oidc,
-                refresh_token: Some("rt-sibling".into()),
-                expires_at: Some(Utc::now() + Duration::hours(1)),
-                ..GrokAuth::test_default()
-            },
-        );
-        write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
-
-        let mut rec = m.unauthorized_recovery(rejected_cred(), RecoverySource::Background);
-        let err = rec.next().await.unwrap_err();
-        assert!(
-            matches!(err, AuthError::PinnedTeamMismatch { .. }),
-            "recovery must reject a wrong-team disk token, got {err:?}"
         );
     }
 }

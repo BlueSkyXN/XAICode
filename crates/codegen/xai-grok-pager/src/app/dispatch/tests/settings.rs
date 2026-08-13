@@ -1689,15 +1689,6 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "screen_mode" => {
             let _ = dispatch(Action::SetScreenMode("minimal".to_string()), app);
         }
-        "voice_keybind_enabled" => {
-            let _ = dispatch(Action::SetVoiceKeybindEnabled(false), app);
-        }
-        "voice_capture_mode" => {
-            let _ = dispatch(Action::SetVoiceCaptureMode("toggle".to_string()), app);
-        }
-        "voice_stt_language" => {
-            let _ = dispatch(Action::SetVoiceSttLanguage("es".to_string()), app);
-        }
         "fork_secondary_model" => {
             use agent_client_protocol as acp;
             use std::sync::Arc;

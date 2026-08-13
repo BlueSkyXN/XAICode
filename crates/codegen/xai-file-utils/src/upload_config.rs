@@ -1,11 +1,13 @@
-//! Upload destination config and archive-restore metadata shared by the
-//! always-on upload queue and session restore paths.
-
-use std::collections::HashMap;
+//! Local archive metadata and compatibility carriers.
+//!
+//! The old cloud upload implementations were removed. These names remain as
+//! inert data types because repository-change archives, config round-trips,
+//! and older wire records still use them.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-/// Method for uploading to object storage.
+/// Legacy destination discriminator. No runtime uploader consumes this value.
 #[derive(Clone, Debug)]
 pub enum UploadMethod {
     Direct {
@@ -26,7 +28,8 @@ pub enum UploadMethod {
     },
 }
 
-/// Configuration for object-storage export.
+/// Legacy trace/archive destination carrier. It is never used to construct a
+/// request in the local build.
 #[derive(Clone, Debug)]
 pub struct TraceExportConfig {
     pub bucket_url: Option<String>,
@@ -36,6 +39,12 @@ pub struct TraceExportConfig {
     pub gcs_prefix: Option<String>,
     pub absolute_paths: bool,
     pub archive_name_override: Option<String>,
+}
+
+impl TraceExportConfig {
+    pub fn bucket_url(&self) -> &str {
+        self.bucket_url.as_deref().unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,9 +90,8 @@ pub const SKIP_DIR_NAMES: &[&str] = &[
 ];
 
 pub fn skip_dir_set() -> &'static std::collections::HashSet<&'static str> {
-    use std::collections::HashSet;
     use std::sync::LazyLock;
-    static SET: LazyLock<HashSet<&str>> =
+    static SET: LazyLock<std::collections::HashSet<&str>> =
         LazyLock::new(|| SKIP_DIR_NAMES.iter().copied().collect());
     &SET
 }

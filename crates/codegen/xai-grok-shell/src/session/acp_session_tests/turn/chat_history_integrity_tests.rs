@@ -192,8 +192,6 @@ async fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_us
                     PromptMode::Agent,
                     None,
                     None,
-                    None,
-                    None,
                     true,
                     None,
                     None,

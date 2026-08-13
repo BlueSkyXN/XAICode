@@ -1,13 +1,10 @@
-//! Telemetry engine for Grok Build sessions: product events + Mixpanel emission +
-//! Sentry error reporting + OpenTelemetry tracing + structured unified log.
+//! Local diagnostics and explicitly configured customer OTLP for XAICode.
 //!
-//! Extracted from `xai-file-utils` per review feedback so telemetry has
-//! its own ownership boundary (see CODEOWNERS) and so downstream consumers
-//! that only want event tracking + inference metrics no longer pull in
-//! Mixpanel/HTTP/identity dependencies.
+//! Product analytics, error-reporting clients, and authenticated vendor OTLP
+//! are not part of this crate. The remaining modules provide local logs,
+//! W3C trace context, typed diagnostics, and the opt-in generic OTLP stream.
 
 mod appender;
-pub mod client;
 pub mod config;
 pub mod context;
 pub mod debug_log;
@@ -15,26 +12,19 @@ pub mod enums;
 pub mod events;
 pub mod external;
 pub mod hooks_log;
-pub mod http;
 pub mod id;
 pub mod instrumentation;
 pub mod memory_log;
 pub mod memory_telemetry;
-pub mod otel_layer;
 pub(crate) mod otlp_http;
 pub mod prompt_timing;
 pub(crate) mod redact_common;
 pub mod sampling_log;
-pub mod sentry;
 pub mod session_ctx;
 pub mod session_metrics;
 pub mod startup;
 pub mod unified_log;
 
-pub use client::{
-    Metadata, TelemetryClient, UserContext, init, init_if_needed, is_enabled,
-    is_session_metrics_enabled,
-};
 pub use events::TelemetryEvent;
 pub use session_ctx::{
     EmitterOrigin, TelemetryCtx, emit_event, emit_event_with_origin, log_event, log_session_event,

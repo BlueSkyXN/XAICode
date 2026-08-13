@@ -6,8 +6,7 @@
 //! call) and asserts the shell sampling client classifies the collected
 //! response as `EmptyReason::ReasoningOnly`. This is the exact check the
 //! sampler's retry loop runs on every completed turn to decide to resample
-//! (and accumulate the out-of-band streaming-capture segments verified by the
-//! actor-level capture test).
+//! and drives the sampler's doom-loop retry accounting).
 
 mod common;
 

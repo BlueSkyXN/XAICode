@@ -544,42 +544,6 @@ pub fn display_cwd_or_cwd(cwd: &std::path::Path, display_cwd: Option<&std::path:
 /// through the outer `ToolBridge` (which would deadlock).
 #[derive(Clone)]
 pub struct InnerDispatch(pub std::sync::Arc<dyn xai_tool_runtime::ToolDispatch>);
-#[derive(Debug, Clone)]
-pub struct ManagedGatewayToolSource {
-    pub connector_id: String,
-    pub connector_name: String,
-    pub tool_id: String,
-    pub tool_name: String,
-    pub call_id: String,
-}
-#[derive(Debug, Clone, Default)]
-pub struct ManagedGatewayToolCatalog(pub HashMap<String, ManagedGatewayToolSource>);
-impl ManagedGatewayToolCatalog {
-    pub fn get(&self, name: &str) -> Option<&ManagedGatewayToolSource> {
-        self.0.get(name)
-    }
-}
-#[derive(Debug, Clone)]
-pub struct ManagedGatewayToolCallResponse {
-    pub result: serde_json::Value,
-    pub connectors_needing_reauth: Vec<String>,
-}
-#[async_trait::async_trait]
-pub trait ManagedGatewayToolCaller: Send + Sync {
-    async fn call_tool(
-        &self,
-        call_id: &str,
-        arguments: serde_json::Value,
-        caller: &str,
-    ) -> Result<ManagedGatewayToolCallResponse, xai_tool_runtime::ToolError>;
-}
-#[derive(Clone)]
-pub struct ManagedGatewayToolClient(pub Arc<dyn ManagedGatewayToolCaller>);
-impl std::fmt::Debug for ManagedGatewayToolClient {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ManagedGatewayToolClient").finish()
-    }
-}
 /// Whether streaming output is enabled for this invocation.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamEnabled(pub bool);

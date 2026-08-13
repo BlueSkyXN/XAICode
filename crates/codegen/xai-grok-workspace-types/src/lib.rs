@@ -21,7 +21,7 @@
 //!   [`EventLag`] backpressure signal. The
 //!   EventBus only carries workspace-observed external state; there is
 //!   no `SessionEvent` enum.
-//! - [`rpc`] -- canonical wire types for the hub-proxied `workspace.*`
+//! - [`rpc`] -- canonical wire types for the `workspace.*` compatibility
 //!   RPC dispatch (trait, envelope, hub tool ids, per-method types).
 //! - [`types`] -- supporting structs/enums referenced from requests,
 //!   chunks, and events. Many of these are minimal placeholders; the

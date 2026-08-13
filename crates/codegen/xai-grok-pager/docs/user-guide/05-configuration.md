@@ -637,6 +637,7 @@ The key ones. See the README for the complete list.
 | `GROK_WEB_FETCH_ALLOW_LOCAL` | Allow `web_fetch` to explicit loopback hosts only (`localhost` / `127.0.0.0/8` / `::1`). Same as `[toolset.web_fetch] allow_local`. Default off; private/metadata stay blocked. |
 | `GROK_AGENT` | Custom agent definition path or name |
 | `GROK_SANDBOX` | Sandbox profile (off, workspace, devbox, read-only, strict; or a custom profile name) |
+| `GROK_EXIT_TIMEOUT_SECS` | Seconds after a quit is requested before the process is force-exited if teardown hangs (default: 20, `0` disables; a hard exit follows 5s later) |
 
 ### Logging
 
@@ -657,8 +658,13 @@ The key ones. See the README for the complete list.
 The following legacy variables are ignored in production because telemetry,
 trace upload, feedback, managed policy, and remote control-plane access are
 disabled: `GROK_TELEMETRY_ENABLED`, `GROK_TELEMETRY_TRACE_UPLOAD`,
-`GROK_TELEMETRY_MIXPANEL_ENABLED`, `GROK_EXTERNAL_OTEL`,
+`GROK_TELEMETRY_MIXPANEL_ENABLED`,
 `GROK_FEEDBACK_ENABLED`, and `GROK_DEPLOYMENT_KEY`.
+
+Generic customer OTLP keys remain parseable for compatibility, but production
+resolution and initialization are inert pending a separate product decision.
+`GROK_EXTERNAL_OTEL`, its `XAICODE_EXTERNAL_OTEL` alias, and standard
+`OTEL_*_EXPORTER` values cannot activate an exporter in this release.
 
 ---
 

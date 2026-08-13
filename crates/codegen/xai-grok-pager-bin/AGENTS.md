@@ -28,6 +28,9 @@ Key files are `Cargo.toml`, `src/main.rs`, and `build.rs`.
 
 ## Validation
 
+Use the root remote-first CI/CD workflow. The commands below define the checks that GitHub
+Actions must run; they are not permission to compile in this worktree.
+
 - `cargo check -p xaicode`
 - `cargo test -p xaicode --all-targets`
 - `cargo build -p xaicode --bin xaicode`

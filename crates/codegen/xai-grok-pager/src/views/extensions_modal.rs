@@ -621,8 +621,6 @@ pub enum ButtonAction {
     ReloadSkills,
     /// Refresh MCP server list (re-fetch from shell).
     RefreshMcpList,
-    /// Open grok.com connectors page (MCP tab: press `o`).
-    OpenManagedConnectors,
     /// Update (fetch latest from source) the selected plugin.
     UpdateSelectedPlugin,
     /// Uninstall the selected plugin.
@@ -2220,7 +2218,7 @@ pub(crate) fn init_mcps_section_collapse_on_first_load(
 }
 
 /// Seed the MCP section collapse map for a post-CTA-install handoff: collapse
-/// Managed, Local, and every plugin section EXCEPT `target_plugin`, then mark
+/// Local and every plugin section EXCEPT `target_plugin`, then mark
 /// the map initialized so the default first-load seeder no-ops. Leaves only the
 /// just-installed plugin's section expanded for the auth step.
 pub(crate) fn seed_mcps_section_collapse_for_cta(
@@ -2231,7 +2229,6 @@ pub(crate) fn seed_mcps_section_collapse_for_cta(
 ) {
     use crate::views::mcps_modal::{McpSectionId, section_for, section_key};
     let target = section_key(&McpSectionId::Plugin(target_plugin.to_string()));
-    collapsed_sections.insert(section_key(&McpSectionId::Managed));
     collapsed_sections.insert(section_key(&McpSectionId::Local));
     for server in servers {
         let key = section_key(&section_for(server));
@@ -3604,20 +3601,6 @@ pub fn render_extensions_modal(
         Rect::new(content_area.x, content_area.y, content_area.width, 1)
     };
 
-    // Underline the Managed section's last description line (the connectors URL) as a link affordance.
-    let managed_section_key =
-        crate::views::mcps_modal::section_key(&crate::views::mcps_modal::McpSectionId::Managed);
-    // `underline_last_desc` and the recorded click band both assume the URL is the
-    // LAST Managed description line; trip a test if that ever stops holding.
-    debug_assert!(
-        crate::views::mcps_modal::section_description_lines(
-            &crate::views::mcps_modal::McpSectionId::Managed,
-            state.session_team_id.as_deref(),
-        )
-        .last()
-        .is_some_and(|l| l.starts_with('[') && l.ends_with(']')),
-        "Managed section's last description line must be the bracketed connectors URL",
-    );
     let picker_entries: Vec<picker::PickerEntry<'_>> = entry_labels
         .iter()
         .enumerate()
@@ -3653,8 +3636,6 @@ pub fn render_extensions_modal(
                     badge: entry_badge_text.get(i).map(|s| s.as_str()).unwrap_or(""),
                     badge_color: entry_badge_color.get(i).copied().flatten(),
                     collapsible: is_collapsible,
-                    underline_last_desc: state.modal_message.is_none()
-                        && group_key.is_some_and(|k| *k == managed_section_key),
                 })
             }
         })
@@ -3677,7 +3658,6 @@ pub fn render_extensions_modal(
     // below own the entries area instead.
     let (item_rects, entry_indices) = if in_input_mode {
         // No picker render in input mode: clear any stale recorded link band.
-        state.picker_state.link_band = None;
         (Vec::new(), Vec::new())
     } else {
         let content_hit = picker::render_picker_content_with_scrollbar_x(
@@ -3754,7 +3734,7 @@ pub fn render_extensions_modal(
                 msg_content_height,
             );
             // Buffer::set_string merges styles; Style::reset clears UNDERLINED/BOLD
-            // left by the list underneath (e.g. Managed connectors URL).
+            // left by the list underneath.
             let clear_style = Style::reset().bg(theme.bg_base);
             let text_style = Style::reset().fg(theme.accent_tool).bg(theme.bg_base);
             for y in msg_area.y..msg_area.y + msg_area.height {
@@ -4331,7 +4311,6 @@ mod tests {
             source: "plugin: acme".into(),
             wire_source: McpWireSource::Local,
             plugin_name: Some("acme".into()),
-            is_managed_gateway: false,
         };
         let form = McpSetupFormState::new(&server).unwrap();
         assert_eq!(form.selected_value().as_deref(), Some("us1"));
@@ -4364,38 +4343,6 @@ mod tests {
     }
 
     #[test]
-    fn mcp_section_managed_collapsed_hides_child_servers() {
-        let mut collapsed = std::collections::HashSet::new();
-        collapsed.insert("mcp-section:managed".to_string());
-        assert!(mcp_section_children_hidden(
-            &collapsed,
-            "mcp-section:managed",
-            false
-        ));
-    }
-
-    #[test]
-    fn mcp_section_search_forces_children_visible() {
-        let mut collapsed = std::collections::HashSet::new();
-        collapsed.insert("mcp-section:managed".to_string());
-        assert!(!mcp_section_children_hidden(
-            &collapsed,
-            "mcp-section:managed",
-            true
-        ));
-    }
-
-    #[test]
-    fn mcp_is_group_expanded_search_overrides_collapsed_section() {
-        let mut state = ExtensionsModalState::new(ExtensionsTab::McpServers);
-        state
-            .mcps_collapsed_sections
-            .insert("mcp-section:managed".to_string());
-        state.picker_state.set_query("linear");
-        assert!(state.is_group_expanded(0, "mcp-section:managed"));
-    }
-
-    #[test]
     fn mcp_tools_is_group_expanded_follows_mcps_tools_expanded() {
         let mut state = ExtensionsModalState::new(ExtensionsTab::McpServers);
         assert!(!state.is_group_expanded(1, "mcp-tools:0"));
@@ -4422,9 +4369,8 @@ mod tests {
             tools: vec![],
             enabled: true,
             source: "managed".into(),
-            wire_source: McpWireSource::Managed,
+            wire_source: McpWireSource::Local,
             plugin_name: None,
-            is_managed_gateway: false,
         }]);
         state.entry_data_indices = vec![None, Some(0)];
         state.entry_group_keys = vec![
@@ -4475,42 +4421,7 @@ mod tests {
             source: "local".into(),
             wire_source: wire,
             plugin_name: None,
-            is_managed_gateway: false,
         }
-    }
-
-    #[test]
-    fn mcp_collapsed_managed_section_omits_server_rows() {
-        use crate::views::mcps_modal::McpWireSource;
-
-        let servers = vec![
-            make_mcp_server_for_rows("grok_com_linear", McpWireSource::Managed, vec![]),
-            make_mcp_server_for_rows("local-srv", McpWireSource::Local, vec![]),
-        ];
-        let mut collapsed = std::collections::HashSet::new();
-        collapsed.insert("mcp-section:managed".to_string());
-        let rows = build_mcp_servers_picker_rows(
-            &servers,
-            "",
-            StatusFilter::All,
-            &collapsed,
-            &std::collections::HashSet::new(),
-        );
-        assert!(
-            rows.labels
-                .iter()
-                .any(|l| l.starts_with("Managed by grok.com")),
-            "managed section header must appear"
-        );
-        assert!(
-            !rows.labels.iter().any(|l| l == "grok_com_linear"),
-            "servers in collapsed managed section must be omitted"
-        );
-        assert!(
-            rows.labels.iter().any(|l| l.starts_with("Local")),
-            "local section should still render"
-        );
-        assert!(rows.labels.iter().any(|l| l == "local-srv"));
     }
 
     #[test]
@@ -4520,10 +4431,10 @@ mod tests {
         let servers = vec![
             make_mcp_server_for_rows(
                 "alpha",
-                McpWireSource::Managed,
+                McpWireSource::Local,
                 vec![("tool-a1", true), ("tool-a2", true)],
             ),
-            make_mcp_server_for_rows("beta", McpWireSource::Managed, vec![("tool-b1", true)]),
+            make_mcp_server_for_rows("beta", McpWireSource::Local, vec![("tool-b1", true)]),
         ];
         let mut tools_expanded = std::collections::HashSet::new();
         tools_expanded.insert(0);
@@ -4567,7 +4478,6 @@ mod tests {
                 source: "plugin: alpha".into(),
                 wire_source: McpWireSource::Local,
                 plugin_name: Some("alpha".into()),
-                is_managed_gateway: false,
             },
             McpServerInfo {
                 name: "p2-srv".into(),
@@ -4583,7 +4493,6 @@ mod tests {
                 source: "plugin: beta".into(),
                 wire_source: McpWireSource::Local,
                 plugin_name: Some("beta".into()),
-                is_managed_gateway: false,
             },
         ];
         let mut state = ExtensionsModalState::new(ExtensionsTab::McpServers);
@@ -4634,7 +4543,6 @@ mod tests {
                 .unwrap_or_else(|| "local".into()),
             wire_source: McpWireSource::Local,
             plugin_name: plugin.map(str::to_string),
-            is_managed_gateway: false,
         };
         let servers = vec![
             server("grok_com_x", None),
@@ -6790,86 +6698,6 @@ mod tests {
             buffer_count(&expanded_buf, "contents shown after install"),
             1,
             "expanded view shows the install hint placeholder exactly once"
-        );
-    }
-
-    #[test]
-    fn confirmation_overlay_suppresses_managed_url_underline() {
-        use crate::views::mcps_modal::McpWireSource;
-
-        // Tall list so the Managed connectors URL sits above the centered
-        // confirmation text (not only cells the message string overwrites).
-        let mut managed = Vec::new();
-        for i in 0..20 {
-            managed.push(make_mcp_server_for_rows(
-                &format!("grok_com_srv_{i}"),
-                McpWireSource::Managed,
-                vec![],
-            ));
-        }
-        managed.push(make_mcp_server_for_rows(
-            "local-grafana",
-            McpWireSource::Local,
-            vec![],
-        ));
-
-        let mut state = ExtensionsModalState::new(ExtensionsTab::McpServers);
-        state.mcps_data = TabDataState::Loaded(managed);
-        state.session_team_id = Some("team-1".into());
-
-        let area = Rect::new(0, 0, 100, 40);
-        let mut open_buf = Buffer::empty(area);
-        render_extensions_modal(&mut open_buf, area, &mut state, None, false, 0);
-
-        let underlined = |buf: &Buffer| -> usize {
-            let mut n = 0usize;
-            for y in 0..area.height {
-                for x in 0..area.width {
-                    if buf
-                        .cell((x, y))
-                        .is_some_and(|c| c.modifier.contains(Modifier::UNDERLINED))
-                    {
-                        n += 1;
-                    }
-                }
-            }
-            n
-        };
-
-        assert!(
-            underlined(&open_buf) > 0,
-            "precondition: managed connectors URL paints UNDERLINED cells"
-        );
-        assert!(
-            state.picker_state.link_band.is_some(),
-            "precondition: link hit band recorded for connectors URL"
-        );
-
-        state.modal_message = Some(ModalMessage::Confirmation {
-            message: "Remove MCP server \"local-grafana\"?".into(),
-            action: ConfirmationAction::DeleteMcpServer {
-                server_name: "local-grafana".into(),
-            },
-            pending_entry_index: Some(0),
-        });
-        state.picker_state.link_band = None;
-
-        let mut confirm_buf = Buffer::empty(area);
-        render_extensions_modal(&mut confirm_buf, area, &mut state, None, false, 0);
-
-        assert_eq!(
-            buffer_count(&confirm_buf, "Remove MCP server \"local-grafana\"?"),
-            1,
-            "confirmation message must be painted"
-        );
-        assert_eq!(
-            underlined(&confirm_buf),
-            0,
-            "confirmation must not paint UNDERLINED under the full overlay"
-        );
-        assert!(
-            state.picker_state.link_band.is_none(),
-            "confirmation must not record a connectors link hit band"
         );
     }
 

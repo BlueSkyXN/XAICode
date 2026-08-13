@@ -29,7 +29,7 @@ fn external_stream_grpc_over_tls_end_to_end() {
 
     let mut cfg = xai_grok_telemetry::external::ExternalOtelConfig::resolve_with(
         |name| match name {
-            "GROK_EXTERNAL_OTEL" => Some("1".into()),
+            "XAICODE_EXTERNAL_OTEL" => Some("1".into()),
             "OTEL_LOGS_EXPORTER" | "OTEL_METRICS_EXPORTER" => Some("otlp".into()),
             "OTEL_EXPORTER_OTLP_ENDPOINT" => Some(endpoint.clone()),
             "OTEL_EXPORTER_OTLP_PROTOCOL" => Some("grpc".into()),
@@ -66,9 +66,9 @@ fn external_stream_grpc_over_tls_end_to_end() {
     });
     xai_grok_telemetry::log_event(xai_grok_telemetry::events::SessionHarness {
         session_id: "sess-grpc-tls-1".into(),
-        client_identifier: Some("grok-pager".into()),
-        model_id: "grok-4".into(),
-        agent_name: "grok-build-plan".into(),
+        client_identifier: Some("xaicode-pager".into()),
+        model_id: "model-a".into(),
+        agent_name: "xaicode-build-plan".into(),
         permission_mode: xai_grok_telemetry::enums::PermissionMode::Ask,
         mcp_server_names: vec![],
         plugin_names: vec![],
@@ -90,8 +90,8 @@ fn external_stream_grpc_over_tls_end_to_end() {
     );
     let names = col::event_names(&collected);
     assert!(
-        names.iter().any(|n| n == "grok_code.session_start"),
-        "expected grok_code.session_start in {names:?}"
+        names.iter().any(|n| n == "ai.xaicode.session_start"),
+        "expected ai.xaicode.session_start in {names:?}"
     );
 
     // Metrics ride the same TLS channel config; make sure at least one

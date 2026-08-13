@@ -6,7 +6,7 @@
 //!   (i.e. `xai_grok_shell::instrumentation_timer!`). Keeping the macro here
 //!   means downstream callers don't need to be edited.
 //! - [`finalize_and_exit`], because shell needs to log a terminal exit event
-//!   and shut down the shared OTel pipeline before the process exits. The
+//!   and shut down the optional generic OTLP stream before the process exits. The
 //!   telemetry crate exposes the shutdown helper, so this thin wrapper just
 //!   plumbs it together with `process::exit`.
 
@@ -19,7 +19,7 @@ pub use xai_grok_telemetry::instrumentation::{
 /// Final cleanup before terminating the process.
 ///
 /// Logs an exit event, flushes instrumentation guards, shuts down the
-/// OpenTelemetry pipeline, and exits with `code`.
+/// optional generic customer OTLP stream, and exits with `code`.
 ///
 /// Stays in shell so callers can keep calling `xai_grok_shell::instrumentation::finalize_and_exit`.
 pub fn finalize_and_exit(code: i32) -> ! {
@@ -35,7 +35,7 @@ pub fn finalize_and_exit(code: i32) -> ! {
         "Exiting process"
     );
     let _ = finalize();
-    xai_grok_telemetry::otel_layer::shutdown_otel();
+    xai_grok_telemetry::external::shutdown();
     // Flush the --debug firehose; this exits via process::exit, bypassing main's flush.
     xai_grok_telemetry::debug_log::flush();
     std::process::exit(code);

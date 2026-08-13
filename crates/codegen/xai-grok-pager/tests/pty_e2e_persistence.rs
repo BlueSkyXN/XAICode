@@ -1,5 +1,5 @@
-//! Session resume, persistence, storage recovery, background-task cleanup, and
-//! parked/wake lifecycle PTY coverage.
+//! Session resume, persistence, background-task cleanup, and parked/wake
+//! lifecycle PTY coverage.
 //!
 //! All cases are ignored for ordinary Cargo runs; Bazel opts in and caps this
 //! process-heavy family at four concurrent libtest workers.
@@ -23,5 +23,3 @@ mod rename_title_shows_in_prompt_border;
 mod reparked_wait_stays_markerless;
 #[path = "pty_e2e/spinner_reappears_after_wait_resumes.rs"]
 mod spinner_reappears_after_wait_resumes;
-#[path = "pty_e2e/storage_upload_parks_on_401_and_drains_after_recovery.rs"]
-mod storage_upload_parks_on_401_and_drains_after_recovery;

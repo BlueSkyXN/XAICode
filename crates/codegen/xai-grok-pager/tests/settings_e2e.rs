@@ -65,9 +65,6 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "collapsed_edit_blocks",
     "respect_manual_folds",
     "hunk_tracker_mode",
-    "voice_keybind_enabled",
-    "voice_capture_mode",
-    "voice_stt_language",
     // Contextual-hints group + its per-tip child toggles (exercised via the
     // group sub-sheet, not as top-level rows).
     "contextual_hints",
@@ -114,8 +111,6 @@ fn matrix_is_subset_of_registry() {
 // ---------------------------------------------------------------------------
 
 fn make_state() -> SettingsModalState {
-    // Voice rows are hidden when the process gate is off (default until startup).
-    xai_grok_pager::app::set_voice_mode_enabled_for_test(true);
     SettingsModalState::new(
         Arc::new(SettingsRegistry::defaults()),
         UiConfig::default(),
@@ -241,12 +236,6 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
             assert_eq!(
                 b, expected,
                 "SetRememberToolApprovals value differs from expected"
-            )
-        }
-        ("voice_keybind_enabled", Action::SetVoiceKeybindEnabled(b)) => {
-            assert_eq!(
-                b, expected,
-                "SetVoiceKeybindEnabled value differs from expected"
             )
         }
         (
@@ -1839,7 +1828,6 @@ fn registry_kind_membership_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             "auto_update",
             "show_tips",
-            "voice_keybind_enabled",
             // Per-tip contextual-hint children (hidden from the top-level list,
             // toggled inside the group sub-sheet) are still Bool settings.
             "contextual_hints.undo",
@@ -1873,8 +1861,6 @@ fn registry_kind_membership_through_pr_14() {
             "screen_mode",
             "scroll_mode",
             "theme",
-            "voice_capture_mode",
-            "voice_stt_language",
         ],
         "Enum kind membership drift",
     );
@@ -1942,8 +1928,6 @@ fn enum_settings_membership_through_pr_14() {
             "screen_mode",
             "scroll_mode",
             "theme",
-            "voice_capture_mode",
-            "voice_stt_language",
         ],
     );
 }
@@ -2005,9 +1989,6 @@ fn defaults_round_trip_through_registry() {
             "coding_data_sharing" => SettingValue::Enum("opt-out"),
             "default_selected_permission" => SettingValue::Enum("always_allow_all_sessions"),
             "hunk_tracker_mode" => SettingValue::Enum("agent_only"),
-            "voice_keybind_enabled" => SettingValue::Bool(true),
-            "voice_capture_mode" => SettingValue::Enum("hold"),
-            "voice_stt_language" => SettingValue::Enum("en"),
             "plan_mode" => SettingValue::Enum("off"),
             "show_tips" => SettingValue::Bool(true),
             "auto_update" => SettingValue::Bool(true),
@@ -2098,8 +2079,7 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetGroupToolVerbs(_))
             | SettingsKeyOutcome::Action(Action::SetCollapsedEditBlocks(_))
             | SettingsKeyOutcome::Action(Action::SetInvertScroll(_))
-            | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_))
-            | SettingsKeyOutcome::Action(Action::SetVoiceKeybindEnabled(_)) => {}
+            | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_)) => {}
             other => panic!(
                 "expected a typed bool setter for `{}`, got {:?}",
                 meta.key, other
@@ -2224,10 +2204,8 @@ fn d_key_emits_open_reset_confirm_for_every_setting() {
             continue;
         }
         let mut s = make_state();
-        // Some rows are terminal-gated (e.g. `voice_capture_mode` is hidden
-        // without key-release reporting, which tests run without). Skip settings
-        // with no visible row; their reset path is covered by the dispatch
-        // round-trip tests.
+        // Skip settings with no visible row; their reset path is covered by
+        // the dispatch round-trip tests.
         let has_row = s
             .rows
             .iter()
@@ -6239,109 +6217,6 @@ fn mouse_click_on_hunk_tracker_mode_indicator_opens_picker_in_one_click() {
     match &s.mode() {
         SettingsModalMode::PickingEnum { key, .. } => assert_eq!(*key, "hunk_tracker_mode"),
         _ => panic!("value click on hunk_tracker_mode must enter PickingEnum"),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// voice_stt_language (SHELL Enum, Editor)
-// ---------------------------------------------------------------------------
-
-/// Enter on the voice_stt_language row opens the picker seeded at the
-/// default `en`.
-#[test]
-fn enter_on_voice_stt_language_row_enters_picking_enum() {
-    let mut s = make_state();
-    navigate_to(&mut s, "voice_stt_language");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "Enter on voice_stt_language row must transition to PickingEnum, got {outcome:?}"
-    );
-    match &s.mode() {
-        SettingsModalMode::PickingEnum {
-            key,
-            original_value,
-            ..
-        } => {
-            assert_eq!(*key, "voice_stt_language");
-            assert_eq!(
-                original_value,
-                &SettingValue::Enum("en"),
-                "default UiConfig voice_stt_language → original 'en'"
-            );
-        }
-        other => panic!("expected PickingEnum mode, got {other:?}"),
-    }
-}
-
-/// Enter on a picker choice commits via `Action::SetVoiceSttLanguage(String)`
-/// carrying the canonical code. Seed is `en` (index 0); one Down moves to
-/// `auto` (System).
-#[test]
-fn voice_stt_language_picker_enter_dispatches_set_commit() {
-    let mut s = make_state();
-    navigate_to(&mut s, "voice_stt_language");
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    match outcome {
-        SettingsKeyOutcome::Action(Action::SetVoiceSttLanguage(code)) => {
-            assert_eq!(code, "auto", "second choice is System (`auto`)");
-        }
-        other => panic!("expected Action::SetVoiceSttLanguage commit, got {other:?}"),
-    }
-    assert!(
-        matches!(s.mode(), SettingsModalMode::Browse),
-        "Enter commit must return to Browse"
-    );
-}
-
-/// Space-toggle on `voice_keybind_enabled` dispatches the typed setter.
-/// Default is ON (the chord works out of the box), so toggling flips it off.
-#[test]
-fn space_on_voice_keybind_enabled_dispatches_typed_setter() {
-    let mut s = make_state();
-    navigate_to(&mut s, "voice_keybind_enabled");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "voice_keybind_enabled", false);
-}
-
-/// Value-column click toggles `voice_keybind_enabled` in one click.
-#[test]
-fn mouse_click_on_voice_keybind_enabled_indicator_toggles_in_one_click() {
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "voice_keybind_enabled") as u16;
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        72,
-        row_y,
-    );
-    assert_set_bool_action(outcome, "voice_keybind_enabled", false);
-}
-
-/// Value-column click on the voice_stt_language row opens the picker in ONE
-/// click (mouse ↔ keyboard parity).
-#[test]
-fn mouse_click_on_voice_stt_language_indicator_opens_picker_in_one_click() {
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "voice_stt_language") as u16;
-
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        72,
-        row_y,
-    );
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "value click must open picker in one click, got: {outcome:?}",
-    );
-    match &s.mode() {
-        SettingsModalMode::PickingEnum { key, .. } => assert_eq!(*key, "voice_stt_language"),
-        _ => panic!("value click on voice_stt_language must enter PickingEnum"),
     }
 }
 

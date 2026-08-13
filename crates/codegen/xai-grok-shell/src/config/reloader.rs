@@ -274,6 +274,11 @@ impl ConfigReloader {
     }
 
     pub(crate) fn reload_auth(&mut self) -> anyhow::Result<()> {
+        // Account auth-file adoption is test-only in XAICode. Keep this
+        // boundary local even if the compatibility reloader is reconnected.
+        if !cfg!(test) {
+            return Ok(());
+        }
         let auth_path = self.grok_home.join("auth.json");
         let store = read_auth_json(&auth_path)?;
 

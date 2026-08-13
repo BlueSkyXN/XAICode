@@ -149,7 +149,7 @@ impl ToolRegistry for MockRegistry {
                 input_schema: tool.input_schema,
                 capabilities: tool.capabilities,
                 notification_schemas: tool.notification_schemas,
-                transport_kind: TransportKind::Remote,
+                transport_kind: TransportKind::Local,
                 if_match_generation: None,
                 metadata: None,
             };
@@ -266,16 +266,10 @@ impl ToolRegistry for MockRegistry {
         let entry = self.entries.get(&(owner, tool.clone()))?;
         let registration = entry.value().registration.clone();
         let handle = self.handles.get(tool)?.value().clone();
-        match registration.transport_kind {
-            TransportKind::Local => Some(ResolvedTool::Local {
-                tool: handle,
-                registration,
-            }),
-            TransportKind::Remote => Some(ResolvedTool::Remote {
-                proxy: handle,
-                registration,
-            }),
-        }
+        Some(ResolvedTool::Local {
+            tool: handle,
+            registration,
+        })
     }
 
     fn list_tools(&self, session: &SessionId, _mode: &ToolDefinitionMode) -> Vec<ToolDescription> {

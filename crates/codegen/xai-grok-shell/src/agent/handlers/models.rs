@@ -1,0 +1,18 @@
+//! `x.ai/models/list`: the model catalog for one-shot consumers.
+
+use agent_client_protocol::{self as acp};
+
+use super::super::mvp_agent::MvpAgent;
+use crate::session::ExtMethodResult;
+
+/// Model state, after a bounded wait for the local/provider catalog.
+pub(crate) async fn handle(
+    agent: &MvpAgent,
+    _args: &acp::ExtRequest,
+) -> Result<acp::ExtResponse, acp::Error> {
+    agent.models_manager.wait_for_first_catalog().await;
+    let state = agent.model_state(None);
+    ExtMethodResult::success(state)
+        .to_ext_response()
+        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+}

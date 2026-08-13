@@ -12,11 +12,43 @@ use xai_grok_shell::sampling::error::{
 };
 use xai_grok_shell::session::ExtMethodResult;
 use xai_grok_shell::session::unified_list::ListScope;
-/// Typed progress message for session restore.
-/// Keeps the progress channel from accepting arbitrary `TaskResult` variants.
-pub(crate) struct RestoreProgressMsg {
-    pub agent_id: AgentId,
-    pub message: String,
+/// Floor for the session create/load RPCs.
+const SESSION_RPC_FLOOR: std::time::Duration = std::time::Duration::from_secs(180);
+/// Headroom over the agent-side `.envrc` budget for the rest of session setup.
+const SESSION_RPC_SLACK: std::time::Duration = std::time::Duration::from_secs(50);
+/// Always covers the agent-side `.envrc` budget so the backstop cannot fire
+/// before the agent's own deadline. Reads `GROK_ENVRC_TIMEOUT_SECS` in this
+/// process; the agent inherits the same environment.
+pub(super) fn session_rpc_timeout() -> std::time::Duration {
+    SESSION_RPC_FLOOR.max(xai_grok_workspace::envrc::loader_budget() + SESSION_RPC_SLACK)
+}
+/// `acp_send` bounded by [`session_rpc_timeout`]; on expiry, an error naming
+/// `action` instead of an eternal spinner.
+pub(super) async fn acp_send_bounded<R, T>(
+    request: T,
+    tx: &tokio::sync::mpsc::UnboundedSender<R>,
+    action: &str,
+) -> Result<T::Response, acp::Error>
+where
+    T: xai_acp_lib::AcpRequest,
+    R: From<xai_acp_lib::AcpArgs<T>> + std::fmt::Debug,
+{
+    let timeout = session_rpc_timeout();
+    match tokio::time::timeout(timeout, acp_send(request, tx)).await {
+        Ok(result) => result,
+        Err(_elapsed) => {
+            Err(
+                acp::Error::new(
+                    acp::ErrorCode::InternalError.into(),
+                    format!(
+                "{action} timed out after {}s. It may still finish in the background; \
+                 retrying right away can run into the same delay.",
+                timeout.as_secs()
+            ),
+                ),
+            )
+        }
+    }
 }
 pub(super) fn log_prompt_result(
     session_id: &acp::SessionId,
@@ -867,35 +899,6 @@ pub(super) fn session_picker_entry_to_roster(
         },
     }
 }
-pub(super) async fn send_logout(tx: &AcpAgentTx) {
-    let _ = tx;
-    // Account sessions do not exist in the clean build.
-}
-/// Best-effort `x.ai/auth/cancel`: stops the shell's device/loopback wait so a
-/// later login is single-flight. Errors are ignored — UI already left
-/// `Authenticating`. `request_seq` scopes the cancel to the abandoned attempt.
-pub(super) async fn send_auth_cancel(tx: &AcpAgentTx, request_seq: u64) -> TaskResult {
-    let _ = (tx, request_seq);
-    TaskResult::AuthCancelComplete
-}
-pub(super) async fn send_check_subscription(
-    tx: &AcpAgentTx,
-    verify: Option<u64>,
-) -> TaskResult {
-    let _ = tx;
-    TaskResult::CheckSubscriptionComplete { verify, meta: None }
-}
-/// One-shot subscription re-check for the credit-limit retry flow.
-/// Same ACP call as `send_check_subscription` but returns a
-/// `CreditLimitRecheckComplete` so the dispatch layer can decide
-/// whether to retry the stashed prompt or show the upsell.
-pub(super) async fn send_credit_limit_recheck(
-    tx: &AcpAgentTx,
-    agent_id: AgentId,
-) -> TaskResult {
-    let _ = tx;
-    TaskResult::CreditLimitRecheckComplete { agent_id, meta: None }
-}
 pub(super) async fn send_authenticate(
     tx: &AcpAgentTx,
     request_seq: u64,
@@ -1263,30 +1266,6 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-        "voice_keybind_enabled" => {
-            let SettingValue::Bool(b) = value else {
-                return Err(kind_mismatch("voice_keybind_enabled", "Bool", &value));
-            };
-            xai_grok_shell::util::config::set_voice_keybind_enabled(b)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        "voice_capture_mode" => {
-            let SettingValue::Enum(s) = value else {
-                return Err(kind_mismatch("voice_capture_mode", "Enum", &value));
-            };
-            xai_grok_shell::util::config::set_voice_capture_mode(s.to_string())
-                .await
-                .map_err(|e| e.to_string())
-        }
-        "voice_stt_language" => {
-            let SettingValue::Enum(s) = value else {
-                return Err(kind_mismatch("voice_stt_language", "Enum", &value));
-            };
-            xai_grok_shell::util::config::set_voice_stt_language(s.to_string())
-                .await
-                .map_err(|e| e.to_string())
-        }
         "max_thoughts_width" => {
             let SettingValue::Int(i) = value else {
                 return Err(kind_mismatch("max_thoughts_width", "Int", &value));
@@ -1494,114 +1473,6 @@ pub(super) fn persist_hint(
             }
             TaskResult::CancelComplete
         });
-}
-/// Map a billing config into a [`CreditBalance`].
-///
-/// Prefers the newer credits-config fields (`credit_usage_percent`,
-/// `current_period`) and falls back to the deprecated
-/// `monthly_limit`/`used`/`billing_period_end`. Shared by `Effect::FetchBilling`
-/// and `Effect::FetchAppBilling` so every pager UI path derives identical usage
-/// values from the same config.
-pub(super) fn credit_balance_from_config(
-    c: xai_grok_shell::extensions::billing::BillingConfig,
-) -> crate::views::credit_bar::CreditBalance {
-    let limit = c.monthly_limit.map(|v| v.val).unwrap_or(0);
-    let used = c.used.map(|v| v.val).unwrap_or(0);
-    let has_credit_pct = c.credit_usage_percent.is_some();
-    let usage_pct = match c.credit_usage_percent {
-        Some(pct) => pct.clamp(0.0, 100.0),
-        None if limit > 0 => (used as f64 / limit as f64 * 100.0).min(100.0),
-        None => 0.0,
-    };
-    let period_end_display = c
-        .current_period
-        .as_ref()
-        .and_then(|p| p.end.clone())
-        .or(c.billing_period_end)
-        .and_then(|s| {
-            chrono::DateTime::parse_from_rfc3339(&s)
-                .ok()
-                .map(|dt| {
-                    dt.with_timezone(&chrono::Local).format("%B %-d, %H:%M").to_string()
-                })
-        });
-    let on_demand_val = c.on_demand_cap.map(|v| v.val).unwrap_or(0);
-    let pay_as_you_go = on_demand_val > 0;
-    let on_demand_cap_cents = if on_demand_val > 0 { Some(on_demand_val) } else { None };
-    let on_demand_used_cents = c
-        .on_demand_used
-        .map(|v| v.val)
-        .unwrap_or_else(|| (used - limit).max(0));
-    let effective_usage_pct = if on_demand_val > 0 {
-        if usage_pct >= 100.0 {
-            (on_demand_used_cents as f64 / on_demand_val as f64 * 100.0).min(100.0)
-        } else if has_credit_pct {
-            usage_pct
-        } else {
-            let total_budget = limit + on_demand_val;
-            if total_budget > 0 {
-                (used as f64 / total_budget as f64 * 100.0).min(100.0)
-            } else {
-                0.0
-            }
-        }
-    } else {
-        usage_pct
-    };
-    let period_type = c.current_period.as_ref().and_then(|p| p.period_type.clone());
-    crate::views::credit_bar::CreditBalance {
-        usage_pct,
-        effective_usage_pct,
-        period_end_display,
-        pay_as_you_go,
-        on_demand_cap_cents,
-        on_demand_used_cents: Some(on_demand_used_cents),
-        prepaid_balance_cents: c.prepaid_balance.map(|v| v.val),
-        period_type,
-        is_unified_billing_user: c.is_unified_billing_user,
-    }
-}
-/// Whether the balance carries a non-zero prepaid credit balance (signed cents).
-pub(super) fn has_prepaid_credits(
-    balance: Option<&crate::views::credit_bar::CreditBalance>,
-) -> bool {
-    balance.and_then(|b| b.prepaid_balance_cents).map(i64::abs).is_some_and(|c| c > 0)
-}
-/// Fetch the user's auto top-up rule via the `x.ai/auto-topup-rule` extension.
-/// A transport failure yields [`AutoTopupFetch::Unchanged`] so the caller keeps
-/// any cached rule rather than treating the blip as "no auto top-up".
-pub(super) async fn fetch_auto_topup_info(
-    tx: &xai_acp_lib::AcpAgentTx,
-) -> crate::views::credit_bar::AutoTopupFetch {
-    let _ = tx;
-    crate::views::credit_bar::AutoTopupFetch::Cleared
-}
-/// Map an `x.ai/auto-topup-rule` payload to an [`AutoTopupFetch`]. A body that
-/// fails to deserialize is a fetch error (→ `Unchanged`, keep the cached rule),
-/// not a definitive "no rule", so a malformed response can't silently flip the
-/// credits warning.
-pub(super) fn parse_auto_topup_response(
-    result: &serde_json::Value,
-) -> crate::views::credit_bar::AutoTopupFetch {
-    use crate::views::credit_bar::{AutoTopupFetch, AutoTopupInfo};
-    use xai_grok_shell::extensions::billing::GetAutoTopupRuleResponse;
-    match serde_json::from_value::<GetAutoTopupRuleResponse>(result.clone()) {
-        Ok(parsed) => {
-            AutoTopupFetch::Resolved(
-                parsed
-                    .rule
-                    .map_or_else(
-                        AutoTopupInfo::disabled,
-                        |rule| AutoTopupInfo {
-                            enabled: rule.enabled,
-                            topup_amount_cents: rule.topup_amount.map(|c| c.val),
-                            max_amount_cents: rule.max_amount_per_month.map(|c| c.val),
-                        },
-                    ),
-            )
-        }
-        Err(_) => AutoTopupFetch::Unchanged,
-    }
 }
 /// A blocking flock on the shared, possibly-network `~/.grok` lock must never
 /// stall the event-loop thread (and would hang exit on `/quit`); the registry

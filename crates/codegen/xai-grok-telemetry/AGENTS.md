@@ -28,5 +28,7 @@ Mixpanel, unified logs, startup hooks, shutdown flushing or stable identifiers.
 
 ## Validation
 
-Run focused crate tests plus root `xaicode` checks. A production-like startup/shutdown smoke
-must observe no external telemetry connection attempts; local unified-log output may remain.
+Use the root remote-first CI/CD workflow. Run focused crate tests, root `xaicode` checks and the
+production-like startup/shutdown smoke in GitHub Actions; local compilation requires explicit
+authorization. The smoke must observe no external telemetry connection attempts; local
+unified-log output may remain.

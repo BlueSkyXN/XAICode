@@ -36,7 +36,7 @@ impl TokenRefresher for ExternalBinaryRefresher {
         if !cfg!(test) {
             let _ = (reason, &self.command);
             return RefreshOutcome::transient(
-                "external account refresh is disabled in the clean local build",
+                "external provider refresh is disabled in the clean local build",
             );
         }
         tracing::debug!(?reason, "auth: external binary refresh starting");

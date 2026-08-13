@@ -653,7 +653,6 @@ fn keyboard_fact_formats_from_explicit_target_evidence() {
                 delivery: crate::clipboard::ClipboardDelivery::Confirmed,
                 fix: None,
             },
-            voice: None,
         },
         findings: Vec::new(),
         probe_notes: Vec::new(),

@@ -27,14 +27,10 @@ static DISMISS_TMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
 static REMOTE_CAMPAIGN_CACHE: RwLock<Vec<CampaignEntry>> = RwLock::new(Vec::new());
 
-/// Seed the process-global remote campaign cache. A `None` settings value (e.g.
-/// a failed fetch) is a no-op so it can't clobber a previously-seeded cache;
-/// `Some` with zero campaigns legitimately clears it (campaigns withdrawn).
+/// Compatibility shim for callers that still carry the remote campaign field.
+/// Campaigns are no longer a runtime consumer in the local build.
 pub fn set_remote_campaigns_from_settings(remote: Option<&RemoteSettings>) {
-    let Some(remote) = remote else {
-        return;
-    };
-    set_remote_campaigns(remote_campaigns_from_settings(Some(remote)));
+    let _ = remote;
 }
 
 fn set_remote_campaigns(entries: Vec<CampaignEntry>) {
@@ -219,13 +215,9 @@ fn resolve_dismissable_campaigns() -> Vec<CampaignEntry> {
 /// Effective config with remote/override-aware campaign overlay
 /// (base → resolve [override/kill/merge/dismiss] → apply), one `ConfigLayers::load`.
 pub fn load_effective_config() -> std::io::Result<toml::Value> {
-    let layers = ConfigLayers::load()?;
-    let dismissed = load_dismissed_ids();
-    let remote = cached_remote_campaigns();
-    let mut effective = layers.effective_config_base();
-    let active = resolve_active_campaigns_from_layers(&layers, &effective, &remote, &dismissed);
-    layers.apply_campaign_overrides(&mut effective, &active);
-    Ok(effective)
+    // Preserve ordinary layer merge/round-trip behavior while leaving hosted
+    // campaign patches out of the runtime effective-config path.
+    Ok(ConfigLayers::load()?.effective_config_base())
 }
 
 /// Effective config with **disk campaigns only** — no remote cache, no
@@ -261,8 +253,7 @@ pub struct CampaignModelsDefault {
 /// [`persist_user_choice`] records the dismissal before the config write, so
 /// the very next `/new` resolves campaign-free.
 pub fn campaign_driven_models_default() -> Option<CampaignModelsDefault> {
-    let layers = ConfigLayers::load().ok()?;
-    campaign_driven_models_default_from(&layers, &cached_remote_campaigns(), &load_dismissed_ids())
+    None
 }
 
 /// Env-free resolution core of [`campaign_driven_models_default`] (unit-testable
@@ -380,30 +371,11 @@ fn apply_campaign_fields(
 /// Seed the remote cache, set every [`CAMPAIGN_FIELDS`] entry (value + flag +
 /// recovery) from the campaign overlay, then re-apply requirements so admin pins win.
 pub fn sync_campaign_fields(cfg: &mut crate::agent::config::Config) {
-    let remote = remote_campaigns_from_settings(cfg.remote_settings.as_ref());
-    // Seed the process-global cache from the parse we already did (skip on `None`
-    // so a failed fetch can't clobber a previously-seeded cache).
-    if cfg.remote_settings.is_some() {
-        set_remote_campaigns(remote.clone());
-    }
-    let Ok(layers) = ConfigLayers::load() else {
-        // Fail closed like the apply path: leave the field values as loaded but
-        // clear the campaign-driven flags/recovery so they can't go stale (a
-        // stale flag would mislabel a user value as campaign-driven, or vice
-        // versa disarm the live-session guard for a campaign value).
-        tracing::warn!("campaigns: config layer load failed; clearing campaign-driven field state");
-        for field in CAMPAIGN_FIELDS {
-            (field.reset)(cfg);
-        }
-        return;
-    };
-    let dismissed = load_dismissed_ids();
-    let base = layers.effective_config_base();
-    let active = resolve_active_campaigns_from_layers(&layers, &base, &remote, &dismissed);
-    let mut effective = base.clone();
-    layers.apply_campaign_overrides(&mut effective, &active);
-    apply_campaign_fields(cfg, &base, &effective, &active);
-    let _ = crate::config::apply_requirements(cfg);
+    // Keep the two runtime-only carrier fields deterministic when an older
+    // caller invokes this compatibility hook. User config values themselves
+    // are left untouched.
+    cfg.models.default_is_campaign_driven = false;
+    cfg.models.pre_campaign_default = None;
 }
 
 /// Dismiss any active campaign whose patch touches `path`, then persist the
@@ -417,26 +389,7 @@ pub(super) async fn persist_user_choice(
     path: PatchPath,
     write: impl FnOnce(&mut super::mcp::Config),
 ) -> anyhow::Result<()> {
-    // Config-layer reads + the flock'd read-modify-write are blocking I/O;
-    // keep them off the async worker. Awaited before the config write so the
-    // dismiss-before-write ordering above holds. A panicked/cancelled dismiss
-    // task must NOT abort the user's write: bookkeeping failure is logged and
-    // the write proceeds (the campaign may re-nudge; the pick is never lost).
-    let dismissed = tokio::task::spawn_blocking(move || {
-        let ids = ids_touching_paths(&resolve_dismissable_campaigns(), &[path]);
-        if !ids.is_empty() {
-            tracing::info!(
-                ?ids,
-                ?path,
-                "campaigns: dismissed after the user set the field"
-            );
-            dismiss_campaign_ids(ids);
-        }
-    })
-    .await;
-    if let Err(e) = dismissed {
-        tracing::warn!(error = %e, "campaigns: dismiss bookkeeping task failed; persisting the choice anyway");
-    }
+    let _ = path;
     super::persist::update_config(write).await
 }
 
@@ -455,7 +408,8 @@ pub async fn persist_models_default(
             super::settings_writes::MAX_DEFAULT_MODEL_LEN
         );
     }
-    persist_user_choice(MODELS_DEFAULT_PATH, move |cfg| {
+    let _ = MODELS_DEFAULT_PATH;
+    super::persist::update_config(move |cfg| {
         cfg.models.default = if s.is_empty() { None } else { Some(s) };
         if let Some(effort) = reasoning_effort {
             cfg.models.default_reasoning_effort = Some(effort);

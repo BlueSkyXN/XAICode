@@ -6,90 +6,6 @@ fn simulate_release_build() {
     unsafe { std::env::set_var(xai_grok_version::TEST_VERSION_ENV, "0.0.0-sim") };
 }
 #[test]
-fn voice_on_welcome_creates_session_and_records() {
-    if !xai_grok_voice::AUDIO_SUPPORTED {
-        return;
-    }
-    let mut app = test_app();
-    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    app.voice_mode_enabled = true;
-    app.voice_cmd_tx = Some(tx);
-    assert!(app.agents.is_empty());
-    dispatch(Action::EnableVoiceMode, &mut app);
-    let ActiveView::Agent(id) = app.active_view else {
-        panic!("voice on welcome must create and switch to a session");
-    };
-    assert!(app.voice_listening(), "capture starts into the new session");
-    assert_eq!(app.voice_recording_target(), Some(VoiceTarget::Agent(id)));
-    assert!(matches!(
-        rx.try_recv(),
-        Ok(xai_grok_voice::VoiceCommand::PttPress)
-    ));
-}
-#[test]
-fn voice_final_routes_to_recording_session_not_active_view() {
-    let mut app = test_app_with_agent();
-    let rec = AgentId(0);
-    let other = AgentId(1);
-    let session = make_test_agent_session(&app, other, "second");
-    app.agents
-        .insert(other, AgentView::new(session, ScrollbackState::new()));
-    app.active_view = ActiveView::Agent(other);
-    app.voice_state = VoiceState::Stopping {
-        target: VoiceTarget::Agent(rec),
-        interim: None,
-    };
-    crate::voice::handle_voice_event(
-        &mut app,
-        xai_grok_voice::VoiceEvent::UtteranceFinal {
-            text: "hello".into(),
-        },
-    );
-    assert_eq!(app.agents.get(&rec).unwrap().prompt.text(), "hello");
-    assert_eq!(app.agents.get(&other).unwrap().prompt.text(), "");
-}
-#[test]
-fn voice_final_dropped_after_recording_session_cleared() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    app.voice_state = VoiceState::Idle;
-    crate::voice::handle_voice_event(
-        &mut app,
-        xai_grok_voice::VoiceEvent::UtteranceFinal {
-            text: "late".into(),
-        },
-    );
-    assert_eq!(app.agents.get(&id).unwrap().prompt.text(), "");
-}
-#[test]
-fn voice_auto_stops_when_leaving_recording_session() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    app.voice_cmd_tx = Some(tx);
-    app.voice_state = VoiceState::Recording {
-        hold: false,
-        target: VoiceTarget::Agent(id),
-        interim: None,
-    };
-    app.active_view = ActiveView::Agent(id);
-    app.enforce_voice_session_bound();
-    assert!(app.voice_listening());
-    assert!(rx.try_recv().is_err());
-    app.active_view = ActiveView::AgentDashboard;
-    app.enforce_voice_session_bound();
-    assert!(!app.voice_listening(), "must stop when leaving the session");
-    assert!(app.voice_interim().is_none());
-    assert!(
-        app.voice_recording_target().is_none(),
-        "target dropped on leave"
-    );
-    assert!(matches!(
-        rx.try_recv(),
-        Ok(xai_grok_voice::VoiceCommand::PttRelease)
-    ));
-}
-#[test]
 fn chip_submit_without_session_keeps_chips_and_does_not_send() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -136,7 +52,7 @@ fn session_created_sets_session_id() {
         }),
         &mut app,
     );
-    assert_eq!(effects.len(), 7);
+    assert_eq!(effects.len(), 6);
     assert!(matches!(
         &effects[0],
         Effect::FetchPromptHistory { session_id, .. } if session_id == "new-session-123"
@@ -151,11 +67,7 @@ fn session_created_sets_session_id() {
         Effect::CheckMarketplaceUpdates { .. }
     ));
     assert!(matches!(&effects[4], Effect::FetchPluginCtaCatalog { .. }));
-    assert!(matches!(
-        &effects[5],
-        Effect::FetchBilling { silent: true, .. }
-    ));
-    assert!(matches!(&effects[6], Effect::RegisterActiveSession { .. }));
+    assert!(matches!(&effects[5], Effect::RegisterActiveSession { .. }));
     assert_eq!(
         app.agents[&id]
             .session
@@ -320,11 +232,6 @@ fn worktree_session_created_sets_session_and_cwd() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::FetchBilling { silent: true, .. }))
-    );
-    assert!(
-        effects
-            .iter()
             .any(|e| matches!(e, Effect::RegisterActiveSession { .. }))
     );
     assert_eq!(
@@ -338,6 +245,47 @@ fn worktree_session_created_sets_session_and_cwd() {
     assert_eq!(app.agents[&id].session.cwd, session_cwd);
     assert_eq!(app.agents[&id].scrollback.len(), 1);
     assert!(app.agents[&id].session.state.is_idle());
+}
+#[test]
+fn worktree_session_created_clears_sticky_branch_from_main_repo() {
+    let mut app = test_app_git();
+    dispatch(
+        Action::NewWorktreeSession {
+            load_session_id: None,
+            label: None,
+            git_ref: None,
+        },
+        &mut app,
+    );
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.current_branch = Some("main-random".into());
+        agent.main_repo = Some("~/old-main".into());
+        agent.is_worktree = false;
+    }
+    let worktree_path = PathBuf::from("/tmp/grok-worktrees/pager-sticky");
+    let session_cwd = worktree_path.clone();
+    dispatch(
+        Action::TaskComplete(TaskResult::WorktreeSessionCreated {
+            agent_id: id,
+            session_id: acp::SessionId::new("wt-sticky-1"),
+            worktree_path,
+            session_cwd: session_cwd.clone(),
+            models: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.current_branch.is_none(),
+        "sticky main-repo branch must not survive the worktree cwd switch"
+    );
+    assert!(agent.main_repo.is_none());
+    assert!(agent.is_worktree);
+    assert!(agent.session.is_worktree);
+    assert_eq!(agent.session.cwd, session_cwd);
 }
 #[test]
 fn worktree_session_preserves_subdirectory_offset() {
@@ -3400,69 +3348,6 @@ mod welcome_workspace_mode {
         set_active_local_workspace(None).unwrap();
     }
     #[test]
-    fn session_restore_failed_clears_history_bypass() {
-        set_active_local_workspace(None).unwrap();
-        let mut app = test_app_with_agent();
-        app.chat_mode = true;
-        app.welcome_history_load_as_build = true;
-        let id = AgentId(0);
-        let effects = dispatch(
-            Action::TaskComplete(TaskResult::SessionRestoreFailed {
-                agent_id: id,
-                error: "boom".into(),
-            }),
-            &mut app,
-        );
-        assert!(effects.is_empty());
-        assert!(
-            !app.welcome_history_load_as_build,
-            "failed restore must not leak bypass into the next load"
-        );
-        set_active_local_workspace(None).unwrap();
-    }
-    #[test]
-    fn restore_and_load_sets_local_workspace_indicator() {
-        set_active_local_workspace(None).unwrap();
-        let mut app = test_app();
-        app.chat_mode = true;
-        app.active_view = ActiveView::Welcome;
-        app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
-        app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
-            id: "remote-1".into(),
-            summary: "remote row".into(),
-            updated_at: chrono::Utc::now(),
-            created_at: chrono::Utc::now(),
-            cwd: "/other".into(),
-            hostname: None,
-            source: "remote".into(),
-            model_id: None,
-            num_messages: 1,
-            last_active_at: None,
-            branch: None,
-            repo_name: String::new(),
-            worktree_label: None,
-            card_detail: None,
-        }]);
-        let effects = dispatch(Action::PickSession(0), &mut app);
-        assert!(
-            effects
-                .iter()
-                .any(|e| matches!(e, Effect::RestoreAndLoadSession { .. })),
-            "remote pick must restore: {effects:?}"
-        );
-        assert!(
-            app.welcome_history_load_as_build,
-            "bypass kept until follow-up LoadSession"
-        );
-        let agent = app.agents.values().next().expect("restore placeholder");
-        assert_eq!(
-            agent.workspace_mode,
-            WelcomeWorkspaceMode::LocalWorkspace,
-            "restore placeholder must show Local indicator"
-        );
-        set_active_local_workspace(None).unwrap();
-    }
-    #[test]
     fn history_build_bypass_only_applies_to_load_session_batch() {
         use crate::app::event_loop::welcome_history_build_bypass_applies;
         assert!(!welcome_history_build_bypass_applies(&[], true));
@@ -3480,14 +3365,6 @@ mod welcome_workspace_mode {
                 session_id: "s".into(),
                 session_cwd: None,
                 chat_kind: false,
-            }],
-            true
-        ));
-        assert!(welcome_history_build_bypass_applies(
-            &[Effect::RestoreAndLoadSession {
-                agent_id: AgentId(0),
-                session_id: "s".into(),
-                session_cwd: "/tmp".into(),
             }],
             true
         ));
@@ -3517,17 +3394,6 @@ mod welcome_workspace_mode {
                 true
             ),
             "worktree-resume batch consumes bypass (single-batch create)"
-        );
-        assert!(
-            !crate::app::event_loop::welcome_history_build_bypass_consume(
-                &[Effect::RestoreAndLoadSession {
-                    agent_id: AgentId(0),
-                    session_id: "s".into(),
-                    session_cwd: "/tmp".into(),
-                }],
-                true
-            ),
-            "restore-only batch keeps bypass for follow-up LoadSession"
         );
         assert!(
             crate::app::event_loop::welcome_history_build_bypass_consume(

@@ -1,7 +1,7 @@
 use crate::clipboard::{ClipboardDelivery, NativeClipboardPreflight};
 use crate::diagnostics::{
     DataControlFact, DiagnosticFinding, DiagnosticReport, FindingDisposition, NewlineFact,
-    ProbeStatus, RuntimeFact, VoiceFacts,
+    ProbeStatus, RuntimeFact,
 };
 use crate::host::{DisplayServer, HostOs};
 
@@ -125,18 +125,6 @@ pub(super) fn format(report: &DiagnosticReport) -> String {
         ClipboardDelivery::Failed => "unavailable",
     };
     fact(&mut out, "status", status);
-
-    if let Some(voice) = &facts.voice {
-        out.push_str("\nVoice\n");
-        match voice {
-            VoiceFacts::Device { name, detail } => {
-                fact(&mut out, "microphone", &format!("{name} ({detail})"));
-            }
-            VoiceFacts::Missing { error } => {
-                fact(&mut out, "microphone", &format!("none detected ({error})"));
-            }
-        }
-    }
 
     if !report.findings.is_empty() {
         out.push_str("\nFindings\n");

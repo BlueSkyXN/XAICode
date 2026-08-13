@@ -170,7 +170,7 @@ pub(crate) fn build_goal_evaluator_request(
         x_grok_conv_id: Some(session_id.to_owned()),
         x_grok_req_id: Some(format!("xai-goal-eval-{}", uuid::Uuid::new_v4())),
         x_grok_session_id: Some(session_id.to_owned()),
-        x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
+        x_grok_agent_id: None,
         ..ConversationRequest::default()
     }
 }

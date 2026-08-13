@@ -3,7 +3,8 @@
 //!
 //! [`TransportKind`] is re-exported from [`xai_tool_protocol`] so the wire
 //! and dispatch layers share one canonical enum and there is no duplicate
-//! `Local` / `Remote` definition to keep in sync.
+//! transport definition to keep in sync. The remote discriminant remains a
+//! wire-compatibility carrier but has no implementation in this crate.
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -82,22 +83,16 @@ impl Principal {
 
 /// Object-safe transport for dispatching tool calls.
 ///
-/// Implementations come in two flavours: [`TransportKind::Local`] resolves
-/// against an in-process registry, while [`TransportKind::Remote`] forwards
-/// a `tool_call_request` over a [`crate::ConnectionClient`].
+/// Local implementations resolve against an in-process registry. The trait
+/// retains the wire `TransportKind` carrier for compatibility.
 #[async_trait]
 pub trait Transport: Send + Sync + std::fmt::Debug {
-    /// Whether the underlying transport is local (in-process) or remote
-    /// (forwarded over a connection).
+    /// Transport kind carrier for protocol compatibility.
     fn kind(&self) -> TransportKind;
 
     /// One-time authorisation handshake.
     ///
-    /// Local transports return a principal derived from the bound OS user
-    /// (or whatever ambient identity the host process provides). Remote
-    /// transports return the principal extracted from a validated
-    /// credential. Subsequent [`Self::call`] invocations reuse this
-    /// principal — the router never re-authorises per call.
+    /// Local transports return a principal derived from the host process.
     async fn authorize(&self) -> Result<Principal, ToolError>;
 
     /// Dispatch a tool call.

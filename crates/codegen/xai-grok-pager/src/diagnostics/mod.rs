@@ -34,72 +34,14 @@ pub(crate) use model::probe_requires_live_tui;
 pub(crate) use model::{
     CLIPBOARD_DELIVERY_UNAVAILABLE_ID, CLIPBOARD_DELIVERY_UNVERIFIED_ID,
     FOCUS_TRACKING_UNAVAILABLE_ID, ITERM2_CLIPBOARD_PERMISSION_ID, NEWLINE_FALLBACK_ID,
-    NOTIFICATION_PROTOCOL_FALLBACK_ID, SANDBOX_PROFILE_CONFLICT_ID, VOICE_NO_INPUT_DEVICE_ID,
-    VSCODE_SSH_NON_ASCII_ID,
+    NOTIFICATION_PROTOCOL_FALLBACK_ID, SANDBOX_PROFILE_CONFLICT_ID, VSCODE_SSH_NON_ASCII_ID,
 };
 pub use model::{
     ClipboardFacts, ColorFacts, DataControlFact, DiagnosticFacts, DiagnosticFinding, DiagnosticId,
     DiagnosticReport, FindingDisposition, KeyboardFact, ManualRemediation, NewlineFact, ProbeNote,
     ProbeStatus, RuntimeFact, TmuxColorPassthrough, TmuxFacts, TmuxOptionFact, TmuxSupportFact,
-    VoiceFacts,
 };
 pub use view::{DiagnosticSnapshot, view};
-
-/// Passive input-device probe for `grok doctor` / `/doctor`.
-///
-/// Does not open a capture stream (no macOS mic-permission prompt). When
-/// `emit_missing_issue` is true and no device exists, appends an issue finding.
-/// The TUI passes true only while voice mode is enabled; standalone doctor uses
-/// the same finding whenever this build supports capture and the probe is missing.
-pub fn apply_voice_probe(report: &mut DiagnosticReport, emit_missing_issue: bool) {
-    // Voice/STT is a removed hosted-product surface in the clean build. Keep
-    // the diagnostic shape for compatibility tests, but never touch audio
-    // devices from a production XAICode process.
-    if !cfg!(test) {
-        let _ = (report, emit_missing_issue);
-        return;
-    }
-    if !xai_grok_voice::AUDIO_SUPPORTED {
-        return;
-    }
-    match xai_grok_voice::input_device_info() {
-        Ok(device) => {
-            report.facts.voice = Some(VoiceFacts::Device {
-                name: device.name,
-                detail: device.detail,
-            });
-        }
-        Err(err) => {
-            let error = match err {
-                xai_grok_voice::VoiceError::Config(message) => message,
-                other => other.to_string(),
-            };
-            report.facts.voice = Some(VoiceFacts::Missing {
-                error: error.clone(),
-            });
-            if emit_missing_issue {
-                report.findings.push(voice_missing_finding(error));
-            }
-        }
-    }
-}
-
-fn voice_missing_finding(error: String) -> DiagnosticFinding {
-    DiagnosticFinding {
-        id: VOICE_NO_INPUT_DEVICE_ID,
-        disposition: FindingDisposition::Issue,
-        message: format!("Voice dictation is unavailable: {error}"),
-        remediation: None,
-        automatic_remediation: None,
-        note: Some(
-            "Connect or select a microphone in your system sound settings. On Linux, install a \
-             supported audio recorder if none was found on PATH. Then run `/doctor` or `grok \
-             doctor` again. Doctor can't detect denied macOS microphone access when the system \
-             returns silence; follow the message shown when dictation fails."
-                .to_owned(),
-        ),
-    }
-}
 
 /// Broad classification of a startup warning.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -2611,23 +2553,6 @@ mod tests {
                 finding.id
             );
         }
-    }
-
-    #[test]
-    fn voice_missing_finding_has_stable_id_and_manual_remediation() {
-        let finding = voice_missing_finding(
-            "no microphone recorder found on PATH: install pipewire (pw-record)".to_owned(),
-        );
-        assert_eq!(finding.id, VOICE_NO_INPUT_DEVICE_ID);
-        assert_eq!(finding.disposition, FindingDisposition::Issue);
-        assert!(finding.message.contains("no microphone recorder"));
-        assert!(finding.remediation.is_none());
-        assert!(finding.automatic_remediation.is_none());
-        assert!(finding.note.as_deref().is_some_and(|note| {
-            note.contains("install a supported audio recorder")
-                && note.contains("grok doctor")
-                && note.contains("can't detect denied macOS microphone access")
-        }));
     }
 
     #[test]

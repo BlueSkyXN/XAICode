@@ -564,8 +564,6 @@ pub fn render_peek_panel(
     panel: &PeekPanelState,
     reply: &mut crate::views::prompt_widget::PromptWidget,
     theme: &Theme,
-    voice_listening: bool,
-    voice_interim: Option<&str>,
     multiline: bool,
     overlay_area: Option<Rect>,
     live_tail: Option<PeekLiveTailArgs<'_>>,
@@ -600,11 +598,6 @@ pub fn render_peek_panel(
     // border, outside the content rows. Painted after the block so it
     // overwrites the plain `╰──╯` fill.
     paint_peek_config_badge(buf, area, theme, panel, reply, multiline);
-
-    // Record badge on the top border while the mic is hot — the peek panel
-    // replaces the dispatch box, so without this a capture started with a row
-    // selected would show no indicator.
-    super::render::paint_record_badge(buf, area, theme, voice_listening);
 
     // Add a 1-cell left + right inset inside the rounded chrome so
     // content doesn't hug the border.
@@ -728,7 +721,7 @@ pub fn render_peek_panel(
                             image_preview: false,
                             ..PromptStyle::default()
                         };
-                        let res = reply.draw(buf, slot, overlay_area, &widget_style, None, None);
+                        let res = reply.draw(buf, slot, overlay_area, &widget_style, None);
                         if selected && panel.focused {
                             caret = res.cursor_pos;
                         }
@@ -868,22 +861,8 @@ pub fn render_peek_panel(
         image_preview: false,
         ..PromptStyle::default()
     };
-    // Interim STT into the reply box so voice stays visible with a peek open.
-    let voice_overlay = (voice_listening || voice_interim.is_some()).then_some(
-        crate::views::prompt_widget::VoicePromptOverlay {
-            interim: voice_interim,
-            color: theme.accent_running,
-        },
-    );
     let caret = reply
-        .draw(
-            buf,
-            text_area,
-            overlay_area,
-            &widget_style,
-            None,
-            voice_overlay,
-        )
+        .draw(buf, text_area, overlay_area, &widget_style, None)
         .cursor_pos;
     // The clickable reply rect spans all reply rows and includes the
     // `❯ ` prefix column for a fatter mouse target; the widget maps
@@ -1276,8 +1255,6 @@ mod tests {
             &theme,
             false,
             None,
-            false,
-            None,
             Some(PeekLiveTailArgs { scrollback: &sb }),
             None,
         );
@@ -1313,8 +1290,6 @@ mod tests {
                 &panel,
                 &mut reply,
                 &theme,
-                false,
-                None,
                 false,
                 None,
                 None,
@@ -1358,8 +1333,6 @@ mod tests {
                 panel,
                 &mut reply,
                 &theme,
-                false,
-                None,
                 false,
                 None,
                 None,
@@ -1448,48 +1421,6 @@ mod tests {
         );
     }
 
-    /// The peek panel paints the `● rec` badge on its top border while voice
-    /// capture is active, and streams the interim transcript into the reply box
-    /// — without this, voice started with a row selected (peek replaces the
-    /// dispatch box) would show no indicator at all.
-    #[test]
-    fn render_peek_paints_record_badge_and_interim_when_listening() {
-        use ratatui::buffer::Buffer;
-        use ratatui::layout::Rect;
-        let theme = Theme::current();
-        let panel = PeekPanelState::new(DashboardRowId::TopLevel(AgentId(0)), fields("Response"));
-        let mut reply = test_reply();
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 6));
-        let _ = render_peek_panel(
-            &mut buf,
-            Rect::new(0, 0, 80, 6),
-            &panel,
-            &mut reply,
-            &theme,
-            true,
-            Some("hello there"),
-            false,
-            None,
-            None,
-            None,
-        );
-        // Badge `" ● rec "` starts at x = area.x + 2, so the dot is at x = 3.
-        assert_eq!(
-            buf[(3, 0)].symbol(),
-            "\u{25CF}",
-            "record dot must paint on the peek top border while listening"
-        );
-        // The interim transcript renders somewhere in the box body.
-        let body: String = (0..6)
-            .flat_map(|y| (0..80).map(move |x| (x, y)))
-            .map(|(x, y)| buf[(x, y)].symbol().to_string())
-            .collect();
-        assert!(
-            body.contains("hello there"),
-            "interim transcript must stream into the peek reply, got: {body:?}"
-        );
-    }
-
     #[test]
     fn peek_handles_missing_question() {
         let mut f = fields("Idle");
@@ -1544,8 +1475,6 @@ mod tests {
             &panel,
             &mut reply,
             &theme,
-            false,
-            None,
             false,
             None,
             None,
@@ -1612,8 +1541,6 @@ mod tests {
             &theme,
             false,
             None,
-            false,
-            None,
             None,
             None,
         );
@@ -1649,8 +1576,6 @@ mod tests {
             &panel,
             &mut reply,
             &theme,
-            false,
-            None,
             false,
             None,
             None,
@@ -1689,8 +1614,6 @@ mod tests {
             &panel,
             &mut reply,
             &theme,
-            false,
-            None,
             false,
             None,
             None,
@@ -1734,8 +1657,6 @@ mod tests {
                 &panel,
                 &mut reply,
                 &theme,
-                false,
-                None,
                 false,
                 None,
                 None,
@@ -1805,8 +1726,6 @@ mod tests {
             &theme,
             false,
             None,
-            false,
-            None,
             None,
             None,
         );
@@ -1860,8 +1779,6 @@ mod tests {
             &theme,
             false,
             None,
-            false,
-            None,
             None,
             None,
         );
@@ -1911,8 +1828,6 @@ mod tests {
             &panel,
             &mut reply,
             &theme,
-            false,
-            None,
             false,
             None,
             None,
@@ -1969,8 +1884,6 @@ mod tests {
             &panel,
             &mut reply,
             &theme,
-            false,
-            None,
             false,
             None,
             None,
@@ -2034,8 +1947,6 @@ mod tests {
             &theme,
             false,
             None,
-            false,
-            None,
             None,
             None,
         );
@@ -2089,8 +2000,6 @@ mod tests {
             &theme,
             false,
             None,
-            false,
-            None,
             None,
             None,
         );
@@ -2129,8 +2038,6 @@ mod tests {
             &panel,
             &mut reply,
             &theme,
-            false,
-            None,
             false,
             None,
             None,
@@ -2175,8 +2082,6 @@ mod tests {
             &panel,
             &mut reply,
             &theme,
-            false,
-            None,
             false,
             Some(overlay),
             None,
@@ -2240,7 +2145,7 @@ mod tests {
         let mut reply = test_reply();
         reply.set_text("alpha\nbravo\ncharlie");
         let res = render_peek_panel(
-            &mut buf, area, &panel, &mut reply, &theme, false, None, false, None, None, None,
+            &mut buf, area, &panel, &mut reply, &theme, false, None, None, None,
         );
         let rect = res.reply_rect.expect("reply rect must be reported");
         assert!(

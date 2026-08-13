@@ -74,7 +74,7 @@ fn normalize_query(query: &str) -> String {
 /// Metadata for a single MCP tool, used to build BM25 documents.
 #[derive(Debug, Clone)]
 pub(crate) struct ToolMetadata {
-    /// Canonical name (e.g., `"linear__save_issue"` or a managed gateway `{connector_id}__{tool_id}`).
+    /// Canonical qualified name (e.g., `"linear__save_issue"`).
     pub qualified_name: String,
     /// Server, source, or grouping name (e.g., `"linear"`).
     pub server_name: String,
@@ -513,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_tool_with_canonical_connector_tool_name_appears_in_results() {
+    fn qualified_tool_name_appears_in_results() {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -538,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_exact_canonical_name_match_returns_tool() {
+    fn exact_canonical_name_match_returns_tool() {
         let index = Bm25ToolSearchIndex::new(make_snapshot(vec![ToolMetadata {
             qualified_name: "slack__search".into(),
             server_name: "slack".into(),
@@ -564,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_only_snapshot_can_stay_partial() {
+    fn partial_snapshot_can_stay_partial() {
         let index = Bm25ToolSearchIndex::new(Arc::new(Mutex::new(ToolMetadataSnapshot {
             tools: vec![ToolMetadata {
                 qualified_name: "grafana__search_dashboards".into(),
@@ -584,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn list_server_summaries_groups_gateway_tools_by_connector_id() {
+    fn list_server_summaries_groups_tools_by_server_name() {
         let index = Bm25ToolSearchIndex::new(make_snapshot(vec![ToolMetadata {
             qualified_name: "grafana__search_dashboards".into(),
             server_name: "grafana".into(),

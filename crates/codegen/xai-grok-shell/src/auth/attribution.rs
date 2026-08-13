@@ -2,19 +2,16 @@
 //!
 //! Every 401 emit site in the shell joins the bearer the client
 //! actually sent on the wire (the `Authorization` value for OAI-compat
-//! backends, `x-api-key` for Anthropic Messages, the API proxy
-//! `Authorization` header for storage / feedback / registry /
-//! idle-resume) with the manager's in-memory token
+//! backends and `x-api-key` for Anthropic Messages) with the manager's
+//! in-memory token
 //! ([`AuthManager::current_or_expired`] -- hard-expired tokens stay
 //! visible, since most 401s arrive exactly then). The two sinks are:
 //!
 //! 1. [`xai_grok_telemetry::unified_log::warn`] for the local
-//!    `~/.grok/logs/unified.jsonl` file (best-effort; ships to GCS
-//!    only on OIDC refresh failure via `auth/refresh.rs`).
+//!    `~/.grok/logs/unified.jsonl` file (best-effort, local only).
 //! 2. A discrete `tracing::warn_span!("auth_401_attribution", ...)`
-//!    captured by the OTel layer in `util/otel_layer.rs` and shipped
-//!    via OTLP export to the configured telemetry backend
-//!    (queryable by span name `auth_401_attribution`).
+//!    retained in the local diagnostics stream. Generic customer OTLP
+//!    export is available only when the local double opt-in is enabled.
 //!
 //! # Schema (every emit)
 //!
@@ -27,9 +24,7 @@
 //!   "expires_at_seconds_from_now": <i64; auth.expires_at minus now
 //!                                 (negative once expired), or 0 when the
 //!                                 manager is empty>,
-//!   "consumer": "OaiCompatClient.<endpoint>" | "StorageClient.<op>"
-//!             | "FeedbackClient.<op>" | "SessionRegistryClient.<op>"
-//!             | "IdleResumeModelRefresh",
+//!   "consumer": "OaiCompatClient.<endpoint>" | "WebSearch",
 //!   "is_stale_snapshot": <bool; true iff a bearer was actually sent AND it
 //!                        differs from the held token -- "sent nothing"
 //!                        (fail-closed) and "held nothing" are both false>
@@ -43,9 +38,8 @@
 //! its six 401 arms; this module provides [`ShellAttribution`], the
 //! concrete impl that the shell wires into
 //! [`xai_grok_sampler::SamplerConfig::attribution_callback`] at every
-//! sampler-construction site. Non-sampler sites (storage / feedback /
-//! registry / idle-resume) call [`record_consumer_401`]
-//! directly with their `(consumer_kind, op)` pair.
+//! sampler-construction site. The generic web-search client uses the
+//! corresponding tool callback implemented below.
 
 use std::sync::Arc;
 
@@ -128,8 +122,8 @@ impl ShellAttribution {
 
     /// Tool-side counterpart of [`Self::new`]: returns
     /// `Arc<dyn xai_grok_tools::Auth401AttributionCallback>` for the
-    /// `with_attribution_callback(...)` builder on each tool HTTP
-    /// client (`ImageGenClient`, `VideoGenClient`, `WebSearchClient`).
+    /// `with_attribution_callback(...)` builder on the generic web-search
+    /// client.
     /// The two callbacks share the same underlying impl and emit the
     /// same `auth_401_attribution` event format -- only the trait
     /// signature differs (`SamplingConsumer` vs. `ToolConsumer`).
@@ -158,20 +152,11 @@ impl Auth401AttributionCallback for ShellAttribution {
     }
 }
 
-/// Tool-side hook: each tool client (image_gen, video_gen, web_search)
-/// in `xai-grok-tools` emits a 401 attribution event through this
-/// trait when its HTTP request returns UNAUTHORIZED. Same shape as
-/// the sampler-side impl above; routes to the same pair of sinks.
-///
-/// `ToolConsumer::VideoGenStart` and `VideoGenPoll` collapse to the
-/// same [`ConsumerKind::VideoGen`] with different op strings so the
-/// gate query can break down video-gen 401s by phase.
+/// Tool-side hook for the generic web-search client. Same shape as the
+/// sampler-side impl above and routed to the same local diagnostic sinks.
 impl ToolAuth401AttributionCallback for ShellAttribution {
     fn record_401(&self, consumer: ToolConsumer, sent_bearer_suffix: Option<&str>) {
         let (kind, op) = match consumer {
-            ToolConsumer::ImageGen => (ConsumerKind::ImageGen, ""),
-            ToolConsumer::VideoGenStart => (ConsumerKind::VideoGen, "start"),
-            ToolConsumer::VideoGenPoll => (ConsumerKind::VideoGen, "poll"),
             ToolConsumer::WebSearch => (ConsumerKind::WebSearch, ""),
         };
         record_consumer_401(
@@ -187,34 +172,12 @@ impl ToolAuth401AttributionCallback for ShellAttribution {
 /// Categories of 401-attribution emit sites. Each variant maps to a
 /// fixed prefix in the rendered `consumer` field; the per-site `op`
 /// string is appended after a `.` separator (omitted for variants that
-/// have no per-operation discriminator, e.g.
-/// [`ConsumerKind::IdleResumeModelRefresh`]).
+/// have no per-operation discriminator).
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ConsumerKind {
     /// Sampler-side OpenAI-compat / Anthropic Messages emit. The op
     /// string is the [`SamplingConsumer::as_endpoint`] return value.
     OaiCompatClient,
-    /// Storage upload / batch / check sites in `upload/storage_client.rs`.
-    StorageClient,
-    /// Feedback collection sites in `agent/feedback_client.rs`.
-    FeedbackClient,
-    /// Session registry register/update sites in
-    /// `agent/session_registry_client.rs`.
-    SessionRegistryClient,
-    /// Idle-resume model-metadata refresh in
-    /// `session/acp_session.rs::maybe_refresh_model_metadata_on_resume`.
-    /// No per-op discriminator -- the consumer string is just
-    /// `"IdleResumeModelRefresh"`.
-    IdleResumeModelRefresh,
-    /// `xai_grok_tools::ToolConsumer::ImageGen` -- Imagine API
-    /// (`POST /images/generations`). No per-op discriminator;
-    /// consumer string is just `"ImageGen"`.
-    ImageGen,
-    /// `xai_grok_tools::ToolConsumer::VideoGenStart` and
-    /// `VideoGenPoll` -- Video Generation API. The op string is
-    /// `"start"` (`POST /videos/generations`) or `"poll"`
-    /// (`GET /videos/{request_id}`).
-    VideoGen,
     /// `xai_grok_tools::ToolConsumer::WebSearch` -- web search via
     /// `POST /responses` with a `WebSearch` tool. No per-op
     /// discriminator; consumer string is just `"WebSearch"`.
@@ -226,12 +189,6 @@ impl ConsumerKind {
     fn prefix(self) -> &'static str {
         match self {
             Self::OaiCompatClient => "OaiCompatClient",
-            Self::StorageClient => "StorageClient",
-            Self::FeedbackClient => "FeedbackClient",
-            Self::SessionRegistryClient => "SessionRegistryClient",
-            Self::IdleResumeModelRefresh => "IdleResumeModelRefresh",
-            Self::ImageGen => "ImageGen",
-            Self::VideoGen => "VideoGen",
             Self::WebSearch => "WebSearch",
         }
     }
@@ -239,13 +196,9 @@ impl ConsumerKind {
     /// `true` for variants that take a per-operation discriminator
     /// appended as `<prefix>.<op>`. `false` for variants whose
     /// `consumer` string is just the prefix
-    /// (`IdleResumeModelRefresh`, `ImageGen`, `WebSearch` -- each is
-    /// a single endpoint with no sub-operation).
+    /// (`WebSearch` is a single endpoint with no sub-operation).
     fn takes_op(self) -> bool {
-        !matches!(
-            self,
-            Self::IdleResumeModelRefresh | Self::ImageGen | Self::WebSearch
-        )
+        !matches!(self, Self::WebSearch)
     }
 }
 
@@ -260,18 +213,10 @@ fn format_consumer(kind: ConsumerKind, op: &str) -> String {
 
 /// Emit a single `auth 401 attribution` event for a per-consumer 401.
 ///
-/// Wraps [`record_auth_401`] with the design-doc `consumer` formatting
-/// (e.g., `"StorageClient.upload"`, `"FeedbackClient.submit"`).
-/// All 401 emit sites in `xai-grok-shell` go through this helper -- the
-/// per-client `record_401_attribution` wrappers in
-/// `agent/feedback_client.rs`, `agent/session_registry_client.rs`,
-/// and `upload/storage_client.rs` each
-/// resolve their bearer and call this with the right `(kind, op)`.
+/// Wraps [`record_auth_401`] with stable per-consumer formatting.
 ///
 /// `sent_bearer` may be either a full bearer (passed by the
-/// non-sampler call sites listed above, which read directly from the
-/// client's `user_token` / `deployment_key` snapshot) or a 12-char
-/// prefix (passed by the sampler-side
+/// tool callback) or a 12-char prefix (passed by the sampler-side
 /// [`Auth401AttributionCallback`] boundary; the sampler scrubs to a
 /// prefix before crossing the crate boundary). The truncation inside
 /// [`record_auth_401`] / `compute_attribution_payload` is idempotent
@@ -303,7 +248,7 @@ pub(crate) fn record_consumer_401(
 ///
 /// `consumer` should be one of the canonical strings used by the
 /// per-client wrappers, e.g. `"OaiCompatClient.chat_completions_stream"`,
-/// `"StorageClient.upload"`, `"IdleResumeModelRefresh"`. Most call
+/// `"IdleResumeModelRefresh"`. Most call
 /// sites should go through [`record_consumer_401`] which formats the
 /// consumer string from a [`ConsumerKind`] for them.
 pub(crate) fn record_auth_401(
@@ -315,27 +260,23 @@ pub(crate) fn record_auth_401(
     let payload = compute_attribution_payload(auth_manager, consumer, sent_bearer);
 
     // Sink 1 -- local file (~/.grok/logs/unified.jsonl) + scrubbed
-    // tracing event. The local file is reliable but only ships to GCS
-    // on OIDC refresh failure (auth/refresh.rs::spawn_diagnostic_upload),
-    // so by itself it does not give visibility into the steady-state
-    // 401 population. Sink 2 below provides that.
+    // tracing event. Sink 2 below provides a second local diagnostic view.
     xai_grok_telemetry::unified_log::warn(
         "auth 401 attribution",
         session_id,
         Some(payload.clone()),
     );
 
-    // Sink 2 -- discrete OTel span exported via OTLP
-    // (util/otel_layer.rs). Auth 401 attribution schema fields below
-    // become OTel span attributes under `attributes.custom.<name>`
-    // per the tracing-opentelemetry bridge; query by span name
-    // `auth_401_attribution` in the configured telemetry backend.
+    // Sink 2 -- discrete tracing span retained by local diagnostics.
+    // If the local double opt-in enables generic customer OTLP, the
+    // configured exporter may carry the span without adding product
+    // identity or hosted transport policy.
     //
     // Wrapping in a `warn_span!` (vs. plain `tracing::warn!`) ensures
-    // emission even when no parent span is active. The OTel layer
+    // emission even when no parent span is active. The tracing subscriber
     // attaches plain events to the currently-entered span only, so a
-    // `tracing::warn!` from a `spawn_blocking` closure (idle-resume
-    // model refresh) or a background sync task is silently dropped.
+    // `tracing::warn!` from a `spawn_blocking` closure or a background
+    // sync task is silently dropped.
     // A `warn_span!` itself is always emitted by the layer's
     // `on_new_span`/`on_close` hooks regardless of parent context.
     //
@@ -674,68 +615,6 @@ mod tests {
         );
     }
 
-    /// `format_consumer` matrix:
-    ///   - generic ops append "." + op (`OaiCompatClient.foo`)
-    ///   - IdleResumeModelRefresh and tool variants drop the op
-    ///     (their consumer string has no sub-op axis).
-    #[test]
-    fn format_consumer_matrix() {
-        let cases: &[(ConsumerKind, &str, &str)] = &[
-            (
-                ConsumerKind::OaiCompatClient,
-                "chat_completions_stream",
-                "OaiCompatClient.chat_completions_stream",
-            ),
-            (
-                ConsumerKind::StorageClient,
-                "upload_file",
-                "StorageClient.upload_file",
-            ),
-            (
-                ConsumerKind::IdleResumeModelRefresh,
-                "",
-                "IdleResumeModelRefresh",
-            ),
-            (
-                ConsumerKind::IdleResumeModelRefresh,
-                "ignored",
-                "IdleResumeModelRefresh",
-            ),
-            (ConsumerKind::ImageGen, "", "ImageGen"),
-            (ConsumerKind::ImageGen, "ignored", "ImageGen"),
-            (ConsumerKind::VideoGen, "start", "VideoGen.start"),
-            (ConsumerKind::VideoGen, "poll", "VideoGen.poll"),
-            (ConsumerKind::WebSearch, "", "WebSearch"),
-            (ConsumerKind::WebSearch, "ignored", "WebSearch"),
-        ];
-        for (kind, op, expected) in cases {
-            assert_eq!(
-                format_consumer(*kind, op),
-                *expected,
-                "kind={kind:?} op={op:?}"
-            );
-        }
-    }
-
-    /// `format_consumer` formats `OaiCompatClient.<endpoint>`
-    /// correctly and omits the `.` separator for
-    /// `IdleResumeModelRefresh`.
-    #[test]
-    fn format_consumer_with_op_appends_dot() {
-        assert_eq!(
-            format_consumer(ConsumerKind::OaiCompatClient, "chat_completions_stream"),
-            "OaiCompatClient.chat_completions_stream"
-        );
-        assert_eq!(
-            format_consumer(ConsumerKind::StorageClient, "upload_file"),
-            "StorageClient.upload_file"
-        );
-    }
-
-    /// `ShellAttribution` implements `xai_grok_tools::Auth401AttributionCallback`
-    /// by routing each `ToolConsumer` variant to the right
-    /// `(ConsumerKind, op)` pair, which formats to the expected
-    /// `consumer` string in the emitted payload.
     #[test]
     #[serial_test::serial(attribution_emit_count)]
     fn shell_attribution_tool_impl_routes_to_correct_consumer_strings() {
@@ -746,12 +625,7 @@ mod tests {
         let cb: Arc<dyn ToolAuth401AttributionCallback> =
             ShellAttribution::new_tool_callback(am_arc.clone(), Some("sid-tool".into()));
 
-        let cases = [
-            (ToolConsumer::ImageGen, "ImageGen"),
-            (ToolConsumer::VideoGenStart, "VideoGen.start"),
-            (ToolConsumer::VideoGenPoll, "VideoGen.poll"),
-            (ToolConsumer::WebSearch, "WebSearch"),
-        ];
+        let cases = [(ToolConsumer::WebSearch, "WebSearch")];
 
         for (consumer, expected_consumer_str) in cases {
             cb.record_401(consumer, Some("bearer-1234567890"));

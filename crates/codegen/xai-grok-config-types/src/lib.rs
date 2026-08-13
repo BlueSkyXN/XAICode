@@ -698,19 +698,13 @@ pub struct RemoteSettings {
     pub managed_mcps_enabled: Option<bool>,
     #[serde(default)]
     pub managed_mcp_gateway_tools_enabled: Option<bool>,
-    /// Remote-policy disable lever for the **external OTEL** stream (customer
-    /// collectors); feeds `ExternalOtelRemotePolicy.force_disable`.
-    /// Restrictive-only by construction: there is deliberately
-    /// no `external_otel_enabled` remote field — remote settings are fetched
-    /// per-run and never persisted, so a remote "enable" could never reach
-    /// init; org-wide enable ships via managed config instead. Applied
-    /// in-process (tighten-only) via
-    /// `xai_grok_telemetry::external::apply_remote_policy`.
+    /// Legacy wire field retained for tolerant RemoteSettings round-trips.
+    /// It is data-only; customer OTLP is never enabled or disabled by remote
+    /// settings.
     #[serde(default)]
     pub external_otel_disabled: Option<bool>,
-    /// Force the external stream's content gates (`OTEL_LOG_USER_PROMPTS`,
-    /// `OTEL_LOG_TOOL_DETAILS`) off regardless of local env/config.
-    /// Tighten-only, like `external_otel_disabled`.
+    /// Legacy wire field retained for tolerant RemoteSettings round-trips.
+    /// Local content gates are controlled only by local config and environment.
     #[serde(default)]
     pub external_otel_content_gates_locked: Option<bool>,
     /// `Some(false)` disarms managed-config signature verification (remote kill-switch).

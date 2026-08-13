@@ -1,21 +1,12 @@
 mod external_refresher;
-mod oidc_refresher;
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::auth::manager::AuthManager;
 pub(crate) use crate::auth::manager::RefreshReason;
-use crate::auth::model::GrokAuth;
+use crate::auth::model::{AuthMode, GrokAuth};
 
 use external_refresher::ExternalBinaryRefresher;
-pub(crate) use oidc_refresher::OidcRefresher;
-
-/// Callback for diagnostic log upload on auth refresh failure.
-/// Args: `(log_bytes, auth_token_suffix, user_id)` — path key is user id, never email.
-pub(crate) type DiagnosticUploader =
-    Arc<dyn Fn(Vec<u8>, String, String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Read-only view of `AuthManager` for refreshers. Enforces the
 /// no-mutation contract on *credential* state at the type level: refreshers
@@ -49,9 +40,8 @@ impl AuthSnapshot for AuthManager {
     }
 }
 
-/// Capability to run the operator's external auth binary. Split out of
-/// [`AuthSnapshot`] so OIDC refreshers (read-only) physically cannot reach it
-/// (interface segregation); only [`ExternalBinaryRefresher`] depends on it.
+/// Capability to run the operator's configured external auth provider. This is
+/// provider-neutral and intentionally independent of xAI account login.
 #[async_trait::async_trait]
 pub(crate) trait ExternalCommandRunner: Send + Sync {
     /// Run the external auth binary and return the parsed output.
@@ -65,19 +55,19 @@ impl ExternalCommandRunner for AuthManager {
     }
 }
 
-/// The credential a refresh would send to the IdP: disk refresh-token first,
-/// then the expired in-mem bearer, then current (only on `ServerRejected`).
-/// Single source of truth shared by [`OidcRefresher::refresh`] (the attempt) and
-/// `AuthManager::attempted_verdict_key` (the verdict scope), so the two can't
-/// drift. The caller supplies the disk read: the verdict path passes a
-/// side-effect-free read, the refresher the observing one.
+/// Resolve a provider credential for a compatibility refresh path. Account
+/// refreshers are not constructed in the local runtime; this helper remains
+/// only for generic provider implementations and tests.
 pub(crate) fn resolve_refresh_credential(
     snap: &dyn AuthSnapshot,
     disk_auth: Option<GrokAuth>,
     reason: RefreshReason,
 ) -> Option<GrokAuth> {
     disk_auth
-        .filter(|a| a.refresh_token.is_some())
+        .filter(|a| {
+            matches!(a.auth_mode, AuthMode::ApiKey | AuthMode::External)
+                && a.refresh_token.is_some()
+        })
         .or_else(|| snap.expired_auth())
         .or_else(|| {
             (reason == RefreshReason::ServerRejected)
@@ -183,7 +173,6 @@ pub(crate) trait TokenRefresher: Send + Sync {
 pub(crate) fn build_refresher(
     auth_manager: Arc<AuthManager>,
     auth_provider_command: Option<String>,
-    diagnostic_uploader: Option<DiagnosticUploader>,
 ) -> Arc<dyn TokenRefresher> {
     match auth_provider_command {
         Some(cmd) => {
@@ -191,13 +180,20 @@ pub(crate) fn build_refresher(
             Arc::new(ExternalBinaryRefresher::new(runner, cmd))
         }
         None => {
-            let snapshot: Arc<dyn AuthSnapshot> = auth_manager;
-            let refresher = OidcRefresher::new(snapshot);
-            match diagnostic_uploader {
-                Some(uploader) => Arc::new(refresher.with_diagnostic_upload(uploader)),
-                None => Arc::new(refresher),
-            }
+            let _ = auth_manager;
+            Arc::new(DisabledRefresher)
         }
+    }
+}
+
+/// Fail-closed compatibility refresher. The local build never guesses an
+/// endpoint when no explicit generic provider command is set.
+struct DisabledRefresher;
+
+#[async_trait::async_trait]
+impl TokenRefresher for DisabledRefresher {
+    async fn refresh(&self, _reason: RefreshReason) -> RefreshOutcome {
+        RefreshOutcome::transient("no external auth provider is configured")
     }
 }
 

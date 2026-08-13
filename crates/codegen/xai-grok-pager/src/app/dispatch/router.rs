@@ -29,8 +29,7 @@ use super::modes::{
     set_permission_mode, set_plan_mode, set_yolo_mode,
 };
 use super::notes::{
-    dispatch_enter_remember_mode, dispatch_open_feedback_pane,
-    dispatch_save_remember_note_from_modal, dispatch_send_btw, dispatch_send_feedback,
+    dispatch_enter_remember_mode, dispatch_save_remember_note_from_modal, dispatch_send_btw,
     dispatch_send_recap, dispatch_send_remember_note,
 };
 use super::permissions::{
@@ -80,8 +79,7 @@ use super::settings::setters::{
     set_multiline_mode, set_page_flip_on_send, set_prompt_suggestions, set_remember_tool_approvals,
     set_render_mermaid, set_respect_manual_folds, set_screen_mode, set_scroll_lines,
     set_scroll_mode, set_scroll_speed, set_show_thinking_blocks, set_show_tips, set_simple_mode,
-    set_theme, set_timeline, set_timestamps, set_vim_mode, set_voice_capture_mode,
-    set_voice_keybind_enabled, set_voice_stt_language,
+    set_theme, set_timeline, set_timestamps, set_vim_mode,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -90,10 +88,10 @@ use super::settings::ui::{
     dispatch_toggle_vim_mode,
 };
 use super::status::{
-    dispatch_copy_session_id, dispatch_manage_billing, dispatch_open_gboom, dispatch_open_tutorial,
-    dispatch_privacy_banner_opt_in, dispatch_privacy_banner_opt_out, dispatch_share_session,
-    dispatch_show_context_info, dispatch_show_queue, dispatch_show_release_notes,
-    dispatch_show_session_info, dispatch_show_tasks, dispatch_show_usage, set_coding_data_sharing,
+    dispatch_copy_session_id, dispatch_open_gboom, dispatch_open_tutorial,
+    dispatch_privacy_banner_opt_in, dispatch_privacy_banner_opt_out, dispatch_show_context_info,
+    dispatch_show_queue, dispatch_show_release_notes, dispatch_show_session_info,
+    dispatch_show_tasks, dispatch_show_usage, set_coding_data_sharing,
 };
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
@@ -106,7 +104,6 @@ use super::turn::{
     dispatch_cancel_scheduled_task, dispatch_cancel_turn, dispatch_cancel_turn_choice,
     dispatch_demote_to_background, dispatch_kill_bg_task, dispatch_kill_subagent,
 };
-use super::voice::{dispatch_enable_voice_mode, dispatch_voice_stop, dispatch_voice_toggle};
 use crate::app::actions::{Action, Effect};
 use crate::app::agent_view::ActivePane;
 use crate::app::app_view::{ActiveView, AppView, AuthState};
@@ -144,9 +141,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
     app.reconcile_foreign_resume_launch();
     let effects = match action {
         Action::Quit | Action::QuitConfirmed => {
-            if let Some(tx) = &app.voice_cmd_tx {
-                let _ = tx.try_send(xai_grok_voice::VoiceCommand::Shutdown);
-            }
             let mut effects = unregister_all_active_sessions(app);
             effects.push(Effect::Quit);
             effects
@@ -379,9 +373,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SendPromptNow { text, images } => {
             super::interject::dispatch_send_prompt_now(app, text, images)
         }
-        Action::EnableVoiceMode => dispatch_enable_voice_mode(app, true),
-        Action::VoiceToggle => dispatch_voice_toggle(app),
-        Action::VoiceStop => dispatch_voice_stop(app),
         Action::SendBashCommand(cmd) => dispatch_send_bash_command(app, cmd),
         Action::ShowUndoTip => dispatch_show_undo_tip(app),
         Action::ShowPlanNudge => dispatch_show_plan_nudge(app),
@@ -941,65 +932,18 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 prev_model_id: None,
             }]
         }
-        Action::AnnouncementsHide => {
-            let shown_key = crate::views::announcements::first_session_announcement(
-                &app.active_announcements,
-                &app.hidden_announcement_ids,
-            )
-            .filter(|a| crate::views::announcements::is_dismissible(a))
-            .map(xai_grok_announcements::announcement_hide_key);
-            if let Some(key) = shown_key
-                && app.hidden_announcement_ids.insert(key)
-            {
-                vec![Effect::PersistAnnouncementsHidden {
-                    hidden_ids: app.hidden_announcement_ids.clone(),
-                }]
-            } else {
-                vec![]
-            }
-        }
-        Action::AnnouncementsShow => {
-            let mut changed = false;
-            for key in crate::views::announcements::session_announcement_hide_keys(
-                &app.active_announcements,
-            ) {
-                changed |= app.hidden_announcement_ids.remove(&key);
-            }
-            if changed {
-                vec![Effect::PersistAnnouncementsHidden {
-                    hidden_ids: app.hidden_announcement_ids.clone(),
-                }]
-            } else {
-                vec![]
-            }
-        }
-        Action::AnnouncementsOpenCta(surface) => {
-            if let Some((promo, url)) = crate::views::announcements::promo_cta_target(
-                &app.active_announcements,
-                &app.hidden_announcement_ids,
-            ) {
-                let url = url.to_owned();
-                let promo_id = promo.id.clone();
-                log_event(xai_grok_telemetry::events::AnnouncementCtaClicked {
-                    id: promo_id,
-                    source: surface,
-                });
-                open_url_or_show(app, &url);
-            }
-            vec![]
-        }
+        // Hosted share/feedback actions have no local dispatch consumer.
+        Action::ShareSession | Action::OpenFeedbackPane | Action::SendFeedback(_) => vec![],
         Action::CancelTurn => dispatch_cancel_turn(app),
         Action::CancelTurnChoice(choice) => dispatch_cancel_turn_choice(app, choice),
         Action::KillBgTask(task_id) => dispatch_kill_bg_task(app, task_id),
         Action::KillSubagent(subagent_id) => dispatch_kill_subagent(app, subagent_id),
         Action::CancelScheduledTask(task_id) => dispatch_cancel_scheduled_task(app, task_id),
         Action::DemoteToBackground => dispatch_demote_to_background(app),
-        Action::RequestBundleStatus => vec![Effect::FetchBundleStatus],
-        Action::ViewCatalogEntry { kind, name } => {
-            vec![Effect::FetchCatalogEntry { kind, name }]
-        }
+        // Hosted bundle/catalog dispatch was removed. Keep these action
+        // variants wire-compatible without contacting a hosted service.
+        Action::RequestBundleStatus | Action::ViewCatalogEntry { .. } => vec![],
         Action::CycleMode => dispatch_cycle_mode(app),
-        Action::ShareSession => dispatch_share_session(app),
         Action::ShowSessionInfo => dispatch_show_session_info(app),
         Action::ShowReleaseNotes { title, content } => {
             dispatch_show_release_notes(app, title, content)
@@ -1008,14 +952,11 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::RenameSession { title } => dispatch_rename_session(app, title),
         Action::ShowContextInfo => dispatch_show_context_info(app),
         Action::ShowUsage => dispatch_show_usage(app),
-        Action::ManageBilling => dispatch_manage_billing(app),
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),
         Action::ShowPlan => dispatch_show_plan(app),
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
         Action::SetPlanMode(kind) => set_plan_mode(app, kind),
-        Action::OpenFeedbackPane => dispatch_open_feedback_pane(app),
-        Action::SendFeedback(text) => dispatch_send_feedback(app, text),
         Action::EnterRememberMode => dispatch_enter_remember_mode(app),
         Action::SendRememberNote(text) => dispatch_send_remember_note(app, text),
         Action::SaveRememberNoteFromModal => dispatch_save_remember_note_from_modal(app),
@@ -1048,9 +989,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetDefaultSelectedPermission(s) => set_default_selected_permission(app, s),
         Action::SetHunkTrackerMode(s) => set_hunk_tracker_mode(app, s),
         Action::SetScreenMode(s) => set_screen_mode(app, s),
-        Action::SetVoiceKeybindEnabled(v) => set_voice_keybind_enabled(app, v),
-        Action::SetVoiceCaptureMode(s) => set_voice_capture_mode(app, s),
-        Action::SetVoiceSttLanguage(s) => set_voice_stt_language(app, s),
         Action::ToggleTimestamps => dispatch_toggle_timestamps(app),
         Action::SetYoloMode(v) => set_yolo_mode(app, v),
         Action::SetPermissionMode(kind) => set_permission_mode(app, kind),
@@ -1111,14 +1049,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             app.show_toast("Account authentication is disabled; use CODING_AGENT_API_KEY");
             vec![]
         }
-        Action::CheckSubscription => {
-            app.show_toast("Provider usage and subscription checks are disabled");
-            vec![]
-        }
-        Action::OpenSupergrokUrl => {
-            app.show_toast("Hosted upgrade links are disabled in the clean build");
-            vec![]
-        }
         Action::OpenUrl(url) => {
             if url.starts_with("file://") {
                 let opened = url::Url::parse(&url)
@@ -1156,10 +1086,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             }
             vec![]
         }
-        Action::OpenManagedConnectors => {
-            app.show_toast("Hosted connectors are disabled in the clean build");
-            vec![]
-        }
         Action::OpenNextLink => {
             with_active_agent(app, |agent| agent.cycle_highlighted_link(true));
             vec![]
@@ -1171,9 +1097,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::TrustFolder => dispatch_trust_folder(app),
         Action::TriggerDeepSearch => dispatch_trigger_deep_search(app, false),
         Action::ForceDeepSearch => dispatch_trigger_deep_search(app, true),
-        Action::PickContentSession { session_id, cwd } => {
-            dispatch_pick_content_session(app, session_id, cwd)
-        }
+        Action::PickContentSession {
+            session_id,
+            cwd: _cwd,
+        } => dispatch_pick_content_session(app, session_id),
         Action::PickContentSessionInWorktree { session_id, cwd } => {
             dispatch_pick_content_session_in_worktree(app, session_id, cwd)
         }
@@ -1558,7 +1485,6 @@ pub(super) fn dispatch_action_result(
                                 ),
                                 pending_entry_index,
                             });
-                        modal.picker_state.link_band = None;
                     } else {
                         modal.modal_message = Some(
                             crate::views::extensions_modal::ModalMessage::Error(outcome.message),

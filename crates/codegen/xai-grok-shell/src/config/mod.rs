@@ -655,7 +655,7 @@ impl SubagentsConfig {
         (project.roles, project.personas)
     }
 }
-/// Managed MCP connector fetching config (`[managed_mcps]` in config.toml).
+/// Legacy managed-MCP compatibility config (`[managed_mcps]` in config.toml).
 ///
 /// See [`Self::resolve`] for full priority chain.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -680,9 +680,8 @@ impl ManagedMcpsConfig {
         is_headless: bool,
     ) -> Self {
         if !cfg!(test) {
-            // Managed MCP enrollment and gateway tools are hosted account
-            // features.  Keep the config shape for compatibility, but do not
-            // let TOML, environment, or remote settings re-enable them.
+            // These legacy carriers are retained for config compatibility; the
+            // local composition does not activate a hosted consumer.
             return Self {
                 enabled: false,
                 gateway_tools_enabled: false,
@@ -876,7 +875,7 @@ impl ModelOverrideConfig {
 /// ```toml
 /// [tools]
 /// disable_zdr_incompatible_tools = true
-/// # [tools.zdr_video_output_s3] — see ZdrVideoOutputS3Config
+/// # [tools.zdr_video_output_s3] — parsed as an inert compatibility carrier.
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
@@ -929,15 +928,15 @@ impl ToolsConfig {
                     Ok(cfg) if cfg.is_valid() => Some(cfg),
                     Ok(_) => {
                         tracing::warn!(
-                                "tools.zdr_video_output_s3 is present but incomplete; ignoring ZDR video output config"
-                            );
+                            "tools.zdr_video_output_s3 is present but incomplete; ignoring ZDR video output config"
+                        );
                         None
                     }
                     Err(e) => {
                         tracing::warn!(
-                                error = %e,
-                                "tools.zdr_video_output_s3 failed to parse; ignoring ZDR video output config"
-                            );
+                            error = %e,
+                            "tools.zdr_video_output_s3 failed to parse; ignoring ZDR video output config"
+                        );
                         None
                     }
                 }),

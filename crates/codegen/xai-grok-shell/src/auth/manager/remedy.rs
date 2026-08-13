@@ -156,7 +156,7 @@ mod tests {
         let command = config.auth_provider_command.clone();
         let manager = Arc::new(AuthManager::new(dir, config));
         manager.hot_swap(credential);
-        manager.configure_refresher(command, None);
+        manager.configure_refresher(command);
         manager
     }
 
@@ -213,16 +213,16 @@ mod tests {
         assert_eq!(manager.auth_remedy(), AuthRemedy::SelfHealing);
     }
 
-    /// A provider command configured alongside OIDC must not capture OIDC's
-    /// own refresh path.
+    /// A provider command handles the provider-neutral external credential
+    /// refresh path without introducing a hosted account refresh.
     #[test]
-    fn expired_oidc_credential_with_a_refresh_token_is_self_healing() {
+    fn expired_external_credential_with_a_refresh_token_is_self_healing() {
         let dir = tempfile::tempdir().unwrap();
         let manager = provider_manager(
             dir.path(),
             GrokAuth {
-                key: "expired-oidc".into(),
-                auth_mode: AuthMode::Oidc,
+                key: "expired-external".into(),
+                auth_mode: AuthMode::External,
                 refresh_token: Some("rt-live".into()),
                 expires_at: Some(Utc::now() - Duration::hours(1)),
                 ..GrokAuth::test_default()
@@ -237,7 +237,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manager = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
         manager.hot_swap(external_credential(Utc::now() - Duration::hours(1)));
-        manager.configure_refresher(None, None);
+        manager.configure_refresher(None);
         assert_eq!(manager.auth_remedy(), AuthRemedy::SelfHealing);
 
         manager.record_permanent_failure(
@@ -268,13 +268,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let manager = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
-        // CI runs in pods where `is_devbox_environment()` is true; a mint would
-        // resolve the credential for the wrong reason.
-        manager.set_devbox_env_for_test(false);
         // A minute from real expiry: inside the 5-min buffer, still on the wire.
         manager.hot_swap(GrokAuth {
             key: "wire-valid".into(),
-            auth_mode: AuthMode::Oidc,
+            auth_mode: AuthMode::External,
             refresh_token: Some("rt-live".into()),
             expires_at: Some(Utc::now() + Duration::minutes(1)),
             ..GrokAuth::test_default()

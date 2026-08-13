@@ -2,136 +2,20 @@
     use super::*;
 
     #[test]
-    fn voice_kill_switch_clears_pending_spawn() {
-        // A `/voice` queued a lazy spawn; then the remote flag turns off. The
-        // teardown must drop the queued spawn so the event loop won't consume it
-        // and surface a misleading "could not start" toast.
-        let mut app = make_app_with_agent("sess-1");
-        app.voice_mode_enabled = true;
-        app.voice_ui_active = true;
-        app.voice_state = crate::app::app_view::VoiceState::ColdStart {
-            hold: false,
-            target: crate::app::app_view::VoiceTarget::DashboardDispatch,
-        };
-
-        let affected = handle_ext_notification(&voice_settings_update(false), &mut app);
-
-        assert!(affected);
-        assert!(!app.voice_mode_enabled);
-        assert!(
-            !app.voice_ui_active,
-            "remote kill switch disarms voice mode"
-        );
-        assert!(
-            !app.voice_state.pending_cold_start(),
-            "queued lazy spawn must be dropped"
-        );
-    }
-
-    #[test]
-    fn settings_api_key_keeps_voice_despite_remote_false() {
-        // Remote false alone must not disable an already API-key session.
-        let mut app = make_app_with_agent("sess-api-key");
-        app.is_api_key_auth = true;
-        app.apply_voice_mode_enabled(true);
-        app.voice_ui_active = true;
-        assert!(handle_ext_notification(
-            &voice_settings_update(false),
-            &mut app
-        ));
-        assert!(app.voice_mode_enabled);
-        assert!(app.voice_ui_active);
-
-        // Same update can stamp API Key while remote settings sends voice false.
-        let mut app = make_app_with_agent("sess-combined");
+    fn settings_update_ignores_account_tier() {
+        let mut app = make_app_with_agent("sess-ignore-tier");
         let notif = acp::ExtNotification::new(
             "x.ai/settings/update",
-            std::sync::Arc::from(
-                serde_json::value::to_raw_value(&serde_json::json!({
-                    "voice_mode_enabled": false,
-                    "subscription_tier_display": "API Key"
-                }))
-                .unwrap(),
-            ),
+            serde_json::value::to_raw_value(&serde_json::json!({
+                "subscription_tier_display": "API Key",
+            }))
+            .unwrap()
+            .into(),
         );
+
         assert!(handle_ext_notification(&notif, &mut app));
-        assert!(app.is_api_key_auth);
-        assert!(app.voice_mode_enabled);
-        assert!(app.tier_restricted_commands.is_empty());
-    }
-
-    #[test]
-    fn settings_non_api_key_tier_clears_stale_api_key_flag() {
-        let mut app = make_app_with_agent("sess-stale-key");
-        assert!(handle_ext_notification(
-            &tier_settings_update("API Key"),
-            &mut app
-        ));
-        assert!(app.is_api_key_auth);
-        assert!(!app.usage_visible);
-        assert!(app.tier_restricted_commands.is_empty());
-        assert!(app.voice_mode_enabled);
-
-        // Later personal Free stamp must not keep API-key bypass or force-on voice.
-        assert!(handle_ext_notification(
-            &tier_settings_update("Free"),
-            &mut app
-        ));
         assert!(!app.is_api_key_auth);
-        assert!(app.usage_visible);
-        assert!(!app.tier_restricted_commands.is_empty());
-        assert!(!app.voice_mode_enabled);
-
-        // Paid tier after API Key must not force voice off (omit voice field).
-        let mut app = make_app_with_agent("sess-paid-keep-voice");
-        assert!(handle_ext_notification(
-            &tier_settings_update("API Key"),
-            &mut app
-        ));
-        assert!(app.voice_mode_enabled);
-        assert!(handle_ext_notification(
-            &tier_settings_update("SuperGrok"),
-            &mut app
-        ));
-        assert!(!app.is_api_key_auth);
-        assert!(app.voice_mode_enabled);
-        assert!(app.tier_restricted_commands.is_empty());
-    }
-
-    #[test]
-    fn voice_remote_true_re_enables_after_kill_switch() {
-        let mut app = make_app_with_agent("sess-1");
-        app.apply_voice_mode_enabled(false);
-        assert!(!app.voice_mode_enabled);
-
-        let affected = handle_ext_notification(&voice_settings_update(true), &mut app);
-
-        assert!(affected);
-        assert!(
-            app.voice_mode_enabled,
-            "remote true lifts the kill switch (env unset)"
-        );
-    }
-
-    #[test]
-    fn voice_settings_update_omitted_leaves_gate_unchanged() {
-        // Unrelated settings push must not flip the gate (default-on stays on;
-        // kill-switch stays off until an explicit true/false).
-        let mut app = make_app_with_agent("sess-1");
-        app.apply_voice_mode_enabled(true);
-        let omit = acp::ExtNotification::new(
-            "x.ai/settings/update",
-            std::sync::Arc::from(
-                serde_json::value::to_raw_value(&serde_json::json!({ "sharing_enabled": true }))
-                    .unwrap(),
-            ),
-        );
-        let _ = handle_ext_notification(&omit, &mut app);
-        assert!(app.voice_mode_enabled);
-
-        app.apply_voice_mode_enabled(false);
-        let _ = handle_ext_notification(&omit, &mut app);
-        assert!(!app.voice_mode_enabled);
+        assert!(app.subscription_tier.is_none());
     }
 
     /// Build an `x.ai/settings/update` carrying only the scheduler flag.

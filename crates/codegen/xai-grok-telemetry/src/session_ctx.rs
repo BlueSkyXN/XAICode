@@ -1,17 +1,16 @@
-//! Ambient session context for telemetry — product events + Mixpanel via
+//! Ambient session context for local diagnostics and customer OTLP via
 //! [`log_event`]. `session_id` and `turn_number` are injected from the
 //! task-local [`TelemetryCtx`] active for the duration of a session.
 //!
-//! Extracted from `xai-grok-shell::agent::telemetry`.
+//! Shared by the shell and pager's local diagnostics.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use serde::Serialize;
-use serde_json::json;
-
-use crate::client::{self, Metadata, UserContext};
 use crate::events::TelemetryEvent;
+use serde::Serialize;
+#[cfg(test)]
+use serde_json::json;
 
 /// Ambient session context for telemetry. Snapshotted synchronously by
 /// `log_event` at call time to avoid racing with turn increments.
@@ -91,36 +90,26 @@ pub async fn with_session_ctx<F: std::future::Future>(ctx: TelemetryCtx, fut: F)
         .await
 }
 
-/// Product surface that emitted a telemetry event. Selects the analytics
-/// event-name prefix so shell and workspace events are distinguishable on the
-/// wire while sharing this emitter (and the `event_value` derivation in
-/// [`crate::client`]).
+/// Product surface that emitted a telemetry event. Selects a local diagnostic
+/// prefix so shell and workspace events remain distinguishable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumCount)]
 pub enum EmitterOrigin {
-    /// `xai-grok-shell` (and the pager/TUI that emit through it).
+    /// XAICode shell (and the pager/TUI that emit through it).
     Shell,
-    /// `xai-grok-workspace` (remote sampler / workspace server).
+    /// Workspace-side sampler/server.
     Workspace,
 }
 
 impl EmitterOrigin {
-    /// Every emitter origin. [`crate::client::event_value`] iterates this to
-    /// strip whichever prefix an event name carries. Iteration *order* is
-    /// irrelevant: the prefixes are mutually exclusive (no
-    /// [`EmitterOrigin::event_prefix`] is a prefix of another — pinned by
-    /// `client`'s `emitter_prefixes_are_mutually_exclusive` test), so at most
-    /// one entry ever matches a given name. Completeness is compiler-enforced
-    /// by the `EmitterOrigin::ALL` length assertion below, so a newly added
-    /// variant that is omitted here fails to compile.
+    /// Every emitter origin. Completeness is compiler-enforced by the
+    /// `EmitterOrigin::ALL` length assertion below.
     pub const ALL: [EmitterOrigin; 2] = [EmitterOrigin::Shell, EmitterOrigin::Workspace];
 
-    /// Analytics event-name prefix for this origin. [`crate::client::event_value`]
-    /// strips the same prefix to derive the wire `event_value`, so the two must
-    /// stay in lockstep.
+    /// Local diagnostic event-name prefix for this origin.
     pub fn event_prefix(self) -> &'static str {
         match self {
-            EmitterOrigin::Shell => "grok-shell-",
-            EmitterOrigin::Workspace => "grok-workspace-",
+            EmitterOrigin::Shell => "xaicode-shell-",
+            EmitterOrigin::Workspace => "xaicode-workspace-",
         }
     }
 }
@@ -128,55 +117,38 @@ impl EmitterOrigin {
 /// Compile-time completeness guard for [`EmitterOrigin::ALL`]: adding a variant
 /// without listing it in `ALL` makes `ALL.len()` diverge from the
 /// `strum::EnumCount`-derived variant count and fails this assertion, so
-/// `client::event_value` can never silently stop stripping an origin's prefix.
+/// a diagnostic consumer can never silently stop recognizing an origin prefix.
 const _: () = assert!(EmitterOrigin::ALL.len() == <EmitterOrigin as strum::EnumCount>::COUNT);
 
-/// Product analytics event (type-safe). Only fires in `Enabled` mode.
-/// Unconditionally fans out to the external OTEL stream first ("one call
-/// site, two sinks, independent gates"): the external gate is
-/// `external::is_active()`, independent of `TelemetryMode`.
+/// Type-safe event fanout to the explicitly configured customer OTLP stream.
 pub fn log_event<T: TelemetryEvent>(data: T) {
-    let _ = data;
+    crate::external::emit(&data);
 }
 
-/// Emit one event to the external stream always (no-op unless the stream is
-/// active) and to the product events/Mixpanel funnel only when `internal_enabled`.
-///
-/// Used by call sites whose internal sink is gated by a *stricter* predicate
-/// than [`log_event`]'s own `TelemetryMode::Enabled` check (the shell's
-/// `telemetry_enabled` = `Enabled && !ZDR`, or `!is_data_collection_disabled()`).
-/// Because [`log_event`] already fans out to the external sink before its
-/// internal gate, the two branches are **mutually exclusive**: routing through
-/// `log_event` when internal is enabled reaches both sinks, and calling
-/// [`crate::external::emit`] directly otherwise keeps `session.count` /
-/// `turn.count` exactly-once on every path while never sending an internal
-/// record under ZDR.
+/// Emit one event to the explicitly configured customer stream. The legacy
+/// internal-sink flag is accepted for source compatibility but has no effect.
 pub fn log_event_dual<T: TelemetryEvent>(internal_enabled: bool, data: T) {
-    let _ = (internal_enabled, data);
+    let _ = internal_enabled;
+    crate::external::emit(&data);
 }
 
-/// Session lifecycle event (type-safe). Fires in both `Enabled` and
-/// `SessionMetrics` modes. Emits with the [`EmitterOrigin::Shell`] prefix;
-/// workspace-side callers use [`log_session_event_with_origin`].
-/// Unconditionally fans out to the external OTEL stream first (independent
-/// gate; see [`log_event`]).
+/// Session lifecycle event (type-safe) for the explicitly configured customer
+/// stream. Workspace-side callers use [`log_session_event_with_origin`].
 pub fn log_session_event<T: TelemetryEvent>(data: T) {
-    let _ = data;
+    crate::external::emit(&data);
 }
 
 /// Session lifecycle event tagged with the emitting [`EmitterOrigin`]. Fires in
-/// both `Enabled` and `SessionMetrics` modes; the origin selects the analytics
-/// event-name prefix (`grok-shell-*` vs `grok-workspace-*`).
+/// both local diagnostic modes; the origin selects the event-name prefix
+/// (`xaicode-shell-*` vs `xaicode-workspace-*`).
 ///
 /// Deliberately **no external fan-out** here: workspace-side callers
-/// (`EmitterOrigin::Workspace` — remote sampler / workspace server, a
-/// different process and monitoring audience) invoke this directly, and the
-/// external stream is Shell-origin only. An `external = …` macro arm on a
-/// workspace-only event therefore has no effect (pinned by test in
-/// `external::tests`). If the external stream ever needs workspace events,
-/// the hook moves here behind an explicit `origin == Shell` filter.
+/// (`EmitterOrigin::Workspace` — workspace-side sampler/server) invoke this
+/// directly; customer export remains restricted to shell-origin events.
 pub fn log_session_event_with_origin<T: TelemetryEvent>(origin: EmitterOrigin, data: T) {
-    let _ = (origin, data);
+    if matches!(origin, EmitterOrigin::Shell) {
+        crate::external::emit(&data);
+    }
 }
 
 /// Emit an event with the default [`EmitterOrigin::Shell`] prefix.
@@ -189,8 +161,8 @@ pub fn emit_event<T: Serialize + Send + 'static>(event_suffix: impl Into<String>
 /// exiting right after emitting drops the event — see [`drain_pending`].
 static PENDING_EVENTS: AtomicUsize = AtomicUsize::new(0);
 
-/// Clean-build compatibility hook. Product event emission is disabled, so
-/// there are never remote posts to drain.
+/// Clean-build compatibility hook. Legacy event emission is disabled, so
+/// there is no remote work to drain.
 pub async fn drain_pending(timeout: std::time::Duration) {
     let _ = timeout;
 }
@@ -229,7 +201,7 @@ mod tests {
         });
     }
 
-    /// Product event emission is a no-op in the clean build, including the
+    /// Legacy event emission is a no-op in the clean build, including the
     /// compatibility drain hook retained for upstream callers.
     #[tokio::test]
     async fn drain_pending_has_no_remote_work() {
@@ -249,36 +221,24 @@ mod tests {
         );
     }
 
-    /// Event-name prefixes are wire contract — analytics queries match on them, so
-    /// they must not drift.
+    /// Event-name prefixes are local diagnostic contract — they must not drift.
     #[test]
     fn event_prefix_is_stable_per_origin() {
-        assert_eq!(EmitterOrigin::Shell.event_prefix(), "grok-shell-");
-        assert_eq!(EmitterOrigin::Workspace.event_prefix(), "grok-workspace-");
-    }
-
-    /// The `Shell` reroute must reproduce the historical
-    /// `format!("grok-shell-{suffix}")` event name byte-for-byte, since every
-    /// existing `log_session_event` / `log_event` / `emit_event` call funnels
-    /// through `EmitterOrigin::Shell`.
-    #[test]
-    fn shell_origin_event_name_matches_legacy_format() {
-        let suffix = "trace_upload_attempted";
-        let rerouted = format!("{}{}", EmitterOrigin::Shell.event_prefix(), suffix);
-        let legacy = format!("grok-shell-{suffix}");
-        assert_eq!(rerouted, legacy);
+        assert_eq!(EmitterOrigin::Shell.event_prefix(), "xaicode-shell-");
+        assert_eq!(
+            EmitterOrigin::Workspace.event_prefix(),
+            "xaicode-workspace-"
+        );
     }
 
     #[test]
     fn workspace_origin_event_name_uses_workspace_prefix() {
         let name = format!("{}turn", EmitterOrigin::Workspace.event_prefix());
-        assert_eq!(name, "grok-workspace-turn");
+        assert_eq!(name, "xaicode-workspace-turn");
     }
 
-    /// `ALL` must enumerate every variant so the stripper in `client` can
-    /// recover the `event_value` for any origin the emitter produces. Length
-    /// completeness is also compiler-enforced by the `const _` assertion in
-    /// this module (via `strum::EnumCount`); this test additionally pins that
+    /// `ALL` must enumerate every variant. Length completeness is also
+    /// compiler-enforced by the const assertion in this module; this test pins that
     /// the known variants are present and that every origin yields a distinct,
     /// non-empty prefix (which `EnumCount` alone does not guarantee).
     #[test]

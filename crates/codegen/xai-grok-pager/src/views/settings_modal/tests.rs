@@ -126,117 +126,19 @@ fn effective_enum_choices_hides_auto_for_permission_mode_when_gated_off() {
     }
 }
 
-/// `voice_capture_mode`'s "hold" choice is gated off without key releases and
-/// available with them; "toggle" is never gated. Permission_mode's "auto"
-/// gating is preserved. Pure — no process-global mutation.
 #[test]
-fn enum_choice_gated_off_covers_voice_and_permission() {
-    // voice "hold": gated iff no key releases.
-    assert!(enum_choice_gated_off(
-        "voice_capture_mode",
-        "hold",
-        true,
-        false
-    ));
-    assert!(!enum_choice_gated_off(
-        "voice_capture_mode",
-        "hold",
-        true,
-        true
-    ));
-    // voice "toggle": never gated.
-    assert!(!enum_choice_gated_off(
-        "voice_capture_mode",
-        "toggle",
-        true,
-        false
-    ));
-    // permission_mode "auto": gated iff the auto gate is off.
-    assert!(enum_choice_gated_off(
-        "permission_mode",
-        "auto",
-        false,
-        true
-    ));
-    assert!(!enum_choice_gated_off(
-        "permission_mode",
-        "auto",
-        true,
-        true
-    ));
+fn enum_choice_gated_off_covers_permission() {
+    // permission_mode "auto" is gated iff the auto gate is off.
+    assert!(enum_choice_gated_off("permission_mode", "auto", false));
+    assert!(!enum_choice_gated_off("permission_mode", "auto", true));
 }
 
-/// Look up a setting's registered metadata by key (test helper).
+/// Look up a setting's registered metadata by key.
 fn meta_for(reg: &SettingsRegistry, key: SettingKey) -> &SettingMeta {
     reg.all()
         .iter()
         .find(|m| m.key == key)
         .unwrap_or_else(|| panic!("`{key}` not registered"))
-}
-
-/// The whole `voice_capture_mode` row is hidden without key-release reporting
-/// (only `toggle` is possible, so there's no choice) and shown with it.
-/// Other settings are always visible. Pure — no process-global mutation.
-#[test]
-fn setting_row_visible_gates_voice_capture_on_key_releases() {
-    let reg = SettingsRegistry::defaults();
-    let voice = meta_for(&reg, "voice_capture_mode");
-    let vim = meta_for(&reg, "vim_mode");
-    // voice_mode = true; kitty_releases varies.
-    assert!(!setting_row_visible(voice, false, false, true));
-    assert!(setting_row_visible(voice, true, false, true));
-    assert!(setting_row_visible(vim, false, false, true));
-}
-
-#[test]
-fn setting_row_visible_hides_voice_rows_when_voice_mode_off() {
-    let reg = SettingsRegistry::defaults();
-    let keybind = meta_for(&reg, "voice_keybind_enabled");
-    let capture = meta_for(&reg, "voice_capture_mode");
-    let language = meta_for(&reg, "voice_stt_language");
-    let vim = meta_for(&reg, "vim_mode");
-    // Gate off: all voice rows gone even with kitty releases + full TUI.
-    assert!(!setting_row_visible(keybind, true, false, false));
-    assert!(!setting_row_visible(capture, true, false, false));
-    assert!(!setting_row_visible(language, true, false, false));
-    // Non-voice rows unaffected.
-    assert!(setting_row_visible(vim, true, false, false));
-    // Gate on: all visible (kitty releases for capture).
-    assert!(setting_row_visible(keybind, true, false, true));
-    assert!(setting_row_visible(capture, true, false, true));
-    assert!(setting_row_visible(language, true, false, true));
-    // The keybind row (unlike capture) doesn't need key-release reporting.
-    assert!(setting_row_visible(keybind, false, false, true));
-}
-
-#[test]
-fn rebuild_rows_drops_voice_settings_when_gate_turns_off() {
-    let prev = crate::app::voice_mode_enabled();
-    crate::app::set_voice_mode_enabled_for_test(true);
-    let mut state = make_state();
-    let has_voice_lang = |s: &SettingsModalState| {
-        s.rows.iter().any(|r| {
-            matches!(
-                r,
-                RowEntry::Setting {
-                    key: "voice_stt_language",
-                    ..
-                }
-            )
-        })
-    };
-    assert!(
-        has_voice_lang(&state),
-        "voice_stt_language should be listed with gate on"
-    );
-
-    crate::app::set_voice_mode_enabled_for_test(false);
-    state.rebuild_rows();
-    assert!(
-        !has_voice_lang(&state),
-        "rebuild after gate off must hide voice_stt_language"
-    );
-    crate::app::set_voice_mode_enabled_for_test(prev);
 }
 
 #[test]
@@ -250,21 +152,10 @@ fn setting_row_visible_hides_theme_rows_in_minimal() {
     ] {
         let meta = meta_for(&reg, key);
         assert!(meta.hidden_in_minimal, "{key} must declare the flag");
-        assert!(
-            !setting_row_visible(meta, true, true, true),
-            "{key} in minimal"
-        );
-        assert!(
-            setting_row_visible(meta, true, false, true),
-            "{key} in full TUI"
-        );
+        assert!(!setting_row_visible(meta, true), "{key} in minimal");
+        assert!(setting_row_visible(meta, false), "{key} in full TUI");
     }
-    assert!(setting_row_visible(
-        meta_for(&reg, "vim_mode"),
-        true,
-        true,
-        true
-    ));
+    assert!(setting_row_visible(meta_for(&reg, "vim_mode"), true,));
 }
 
 /// `action_for_bool` mirrors `current_value_for`: every registered
@@ -570,8 +461,6 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
 /// `auto_compact_threshold_percent` are not exposed in the modal.
 #[test]
 fn rows_contain_categories_and_settings_through_pr_14() {
-    let prev_voice = crate::app::voice_mode_enabled();
-    crate::app::set_voice_mode_enabled_for_test(false);
     let s = make_state();
     let headers: Vec<&SettingCategory> = s
         .rows
@@ -664,8 +553,6 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // SHELL-owned prompt_suggestions (Editor; tab autocomplete
             // ghost text, live cache).
             "prompt_suggestions",
-            // voice_keybind_enabled + voice_capture_mode + voice_stt_language
-            // hidden when the voice gate is off.
             // SHELL-owned permission_mode (Agent category).
             "permission_mode",
             // SHELL-owned remember_tool_approvals (Agent category,
@@ -701,7 +588,6 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "hunk_tracker_mode",
         ]
     );
-    crate::app::set_voice_mode_enabled_for_test(prev_voice);
 }
 
 #[test]

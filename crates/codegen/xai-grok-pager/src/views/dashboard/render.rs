@@ -329,11 +329,6 @@ pub fn render_dashboard(
         // Split borrows: the panel is read from `state.peek` while the
         // reply widget (`state.peek_reply`) is drawn mutably — disjoint
         // fields, destructured so the borrow checker can see it.
-        // Capture voice state before the disjoint destructure so the peek
-        // reply can show the record badge + interim transcript (the peek box
-        // replaces the dispatch box, which would otherwise own the overlay).
-        let voice_listening = state.voice_listening;
-        let voice_interim = state.voice_interim.clone();
         let multiline = state.multiline_mode;
         let peeked_row = state.peek.as_ref().map(|p| p.row.clone());
         let question_pending = state.peek.as_ref().is_some_and(|p| p.question.is_some());
@@ -375,8 +370,6 @@ pub fn render_dashboard(
                 panel,
                 &mut state.peek_reply,
                 &theme,
-                voice_listening,
-                voice_interim.as_deref(),
                 multiline,
                 Some(layout.list).filter(|r| r.area() > 0),
                 live_tail,
@@ -1236,7 +1229,6 @@ fn render_location_picker(
                 badge: badge.as_str(),
                 badge_color: (!badge.is_empty()).then_some(theme.accent_user),
                 collapsible: false,
-                underline_last_desc: false,
             })
         })
         .collect();
@@ -2891,23 +2883,6 @@ fn paint_dispatch_config_badge(
         .render_info_line(buf, info_rect, &info, theme.bg_base, theme, input_focused);
 }
 
-/// Paint the left-aligned `● rec` badge on a box's top border while the mic is
-/// hot. Shared by the dispatch box and the peek panel that replaces it, so a
-/// capture started in either surface shows the same indicator.
-pub(super) fn paint_record_badge(buf: &mut Buffer, area: Rect, theme: &Theme, listening: bool) {
-    if listening && area.width >= 12 {
-        buf.set_string(
-            area.x + 2,
-            area.y,
-            " \u{25CF} rec ",
-            Style::default()
-                .fg(theme.accent_error)
-                .bg(theme.bg_base)
-                .add_modifier(Modifier::BOLD),
-        );
-    }
-}
-
 fn render_dispatch(
     buf: &mut Buffer,
     area: Rect,
@@ -2959,7 +2934,6 @@ fn render_dispatch(
         // spawned agent will use (the `/model`-staged choice, else the current
         // default), plus the staged mode as a flag.
         paint_dispatch_config_badge(buf, area, theme, state, input_focused);
-        paint_record_badge(buf, area, theme, state.voice_listening);
         Rect {
             x: inner.x + 1,
             y: inner.y,
@@ -3046,21 +3020,12 @@ fn render_dispatch(
     let prefix = "\u{276F} ";
     let prefix_w = UnicodeWidthStr::width(prefix) as u16;
 
-    // When voice is active, draw through PromptWidget even on an empty buffer
-    // so the manual empty-state branch is skipped.
-    let voice_overlay = (state.voice_listening || state.voice_interim.is_some()).then_some(
-        crate::views::prompt_widget::VoicePromptOverlay {
-            interim: state.voice_interim.as_deref(),
-            color: theme.accent_running,
-        },
-    );
-
     // Empty input (non-search): paint the `❯` prefix + the contextual
     // placeholder (reply / error toast / new-session) and park the caret
     // at the text start. `PromptWidget::draw` only paints a placeholder
     // when *unfocused*, but we want a visible caret, so the empty state
     // is rendered directly here.
-    if state.dispatch.text().is_empty() && voice_overlay.is_none() {
+    if state.dispatch.text().is_empty() {
         buf.set_string(
             content.x,
             content.y,
@@ -3099,7 +3064,7 @@ fn render_dispatch(
     };
     state
         .dispatch
-        .draw(buf, content, overlay_area, &style, None, voice_overlay)
+        .draw(buf, content, overlay_area, &style, None)
         .cursor_pos
 }
 

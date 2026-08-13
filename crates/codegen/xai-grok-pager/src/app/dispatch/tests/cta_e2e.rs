@@ -1465,7 +1465,7 @@ mod cta_e2e {
         ));
 
         let servers = vec![
-            cta_mcp_server("grok_com_managed", None, McpServerDisplayStatus::Ready),
+            cta_mcp_server("grok_com_local", None, McpServerDisplayStatus::Ready),
             cta_mcp_server("local-srv", None, McpServerDisplayStatus::Ready),
             cta_mcp_server("other-srv", Some("slack"), McpServerDisplayStatus::Ready),
             cta_mcp_server(
@@ -1493,7 +1493,6 @@ mod cta_e2e {
             other => panic!("expected mcps_data Loaded, got {other:?}"),
         }
         let collapsed = &modal.mcps_collapsed_sections;
-        assert!(collapsed.contains(&section_key(&McpSectionId::Managed)));
         assert!(collapsed.contains(&section_key(&McpSectionId::Local)));
         assert!(collapsed.contains(&section_key(&McpSectionId::Plugin("slack".into()))));
         assert!(!collapsed.contains(&section_key(&McpSectionId::Plugin("figma".into()))));

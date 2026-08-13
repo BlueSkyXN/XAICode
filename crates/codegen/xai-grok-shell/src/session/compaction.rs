@@ -2237,7 +2237,6 @@ mod inline_auto_compact_flow_tests {
     use crate::session::acp_session::McpReminderMode;
     use crate::terminal::AsyncTerminalRunner;
     use crate::terminal::runner::{TerminalError, TerminalRunRequest, TerminalRunResult};
-    use std::sync::OnceLock;
     use tokio::sync::mpsc;
     use xai_grok_paths::AbsPathBuf;
     use xai_grok_workspace::file_system::MockFs;
@@ -2401,7 +2400,6 @@ mod inline_auto_compact_flow_tests {
             client_identifier: None,
             origin_client: None,
             feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-            upload_queue: Arc::new(OnceLock::new()),
             sync_loop_cancel: None,
             agent: std::cell::RefCell::new(test_agent_default().await),
             last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -2452,8 +2450,6 @@ mod inline_auto_compact_flow_tests {
                 std::collections::VecDeque::new(),
             ),
             goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
-            managed_mcp_handle: Default::default(),
-            managed_mcp_expires_at: std::sync::Mutex::new(None),
             initial_client_mcp_servers: vec![],
             tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
             mcp_announced_servers: parking_lot::Mutex::new(std::collections::HashMap::new()),
@@ -2486,9 +2482,6 @@ mod inline_auto_compact_flow_tests {
             turn_summary_generation: std::cell::Cell::new(0),
             turn_summary_enabled: false,
             session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            streaming_turn_capture: parking_lot::Mutex::new(
-                crate::session::acp_session::StreamingTurnCapture::default(),
-            ),
             turn_stream_drained: parking_lot::Mutex::new(None),
             sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
             rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
@@ -2498,7 +2491,6 @@ mod inline_auto_compact_flow_tests {
             ),
             subagent_token_records: parking_lot::Mutex::new(std::collections::HashMap::new()),
             workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
-            trace_config_template: std::cell::RefCell::new(None),
         }
     }
     /// Test check_auto_compact_needed uses state values.

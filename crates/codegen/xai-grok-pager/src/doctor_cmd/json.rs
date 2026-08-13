@@ -3,7 +3,7 @@ use serde::Serialize;
 use crate::clipboard::{ClipboardDelivery, NativeClipboardPreflight, Osc52Capability};
 use crate::diagnostics::{
     DataControlFact, DiagnosticFinding, DiagnosticReport, FindingDisposition, NewlineFact,
-    ProbeNote, ProbeStatus, RuntimeFact, VoiceFacts,
+    ProbeNote, ProbeStatus, RuntimeFact,
 };
 use crate::host::HostOs;
 use crate::terminal::{ByobuBackend, ModifierFate, MultiplexerKind, TerminalName};
@@ -56,8 +56,6 @@ struct JsonFacts<'a> {
     keyboard: Option<JsonKeyboardFact>,
     newline: Option<JsonNewlineFact<'a>>,
     clipboard: JsonClipboardFacts<'a>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    voice: Option<JsonVoiceFacts<'a>>,
 }
 
 impl<'a> From<&'a DiagnosticReport> for JsonFacts<'a> {
@@ -90,38 +88,6 @@ impl<'a> From<&'a DiagnosticReport> for JsonFacts<'a> {
             }),
             newline: facts.newline.as_ref().map(JsonNewlineFact::from),
             clipboard: JsonClipboardFacts::from(&facts.clipboard),
-            voice: facts.voice.as_ref().map(JsonVoiceFacts::from),
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct JsonVoiceFacts<'a> {
-    status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<&'a str>,
-}
-
-impl<'a> From<&'a VoiceFacts> for JsonVoiceFacts<'a> {
-    fn from(facts: &'a VoiceFacts) -> Self {
-        match facts {
-            VoiceFacts::Device { name, detail } => Self {
-                status: "available",
-                name: Some(name),
-                detail: Some(detail),
-                error: None,
-            },
-            VoiceFacts::Missing { error } => Self {
-                status: "missing",
-                name: None,
-                detail: None,
-                error: Some(error),
-            },
         }
     }
 }

@@ -5,23 +5,12 @@
     unreachable_code,
     dead_code
 )]
-//! Local data collection: per-turn event tracking, upload queueing, and
-//! S3-compatible blob storage.
-pub(crate) mod circuit_breaker_observer;
-/// Wrap a raw client with [`xai_grok_auth::AuthRetryMiddleware`] for automatic 401 retry.
-pub fn with_auth_retry(
-    client: reqwest::Client,
-    credentials: std::sync::Arc<dyn xai_grok_auth::AuthCredentialProvider>,
-) -> reqwest_middleware::ClientWithMiddleware {
-    reqwest_middleware::ClientBuilder::new(client)
-        .with(xai_grok_auth::AuthRetryMiddleware::new(credentials, 1))
-        .build()
-}
+//! Local data collection and data-plane helpers.
+//!
+//! This crate deliberately contains no upload queue or cloud storage client.
+//! The retained modules write local event logs, classify local workspaces, and
+//! carry W3C trace context for explicitly configured local/generic transports.
 pub mod events;
-pub mod gcs;
-pub mod queue;
-pub mod s3;
-pub mod storage_client;
 pub mod trace_context;
 pub mod upload_config;
 pub mod workspace_classifier;

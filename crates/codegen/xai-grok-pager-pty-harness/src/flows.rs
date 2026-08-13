@@ -72,8 +72,8 @@ pub fn inference_request_count(content: &ContentController) -> usize {
 /// and never enters the auth manager). Load-bearing details: the scope key
 /// must be `<issuer>::<client_id>`, `auth_mode` must be `oidc`,
 /// `expires_at` must be far-future so no network refresh is attempted, and
-/// `coding_data_retention_opt_out` must be `false` so collection/upload-path
-/// e2es (e.g. storage park-on-401) still enqueue traces — missing that field
+/// `coding_data_retention_opt_out` must be `false` so collection-path e2es
+/// still enqueue traces — missing that field
 /// now deserializes as opted-out via
 /// `default_coding_data_retention_opt_out()`. The mock server accepts any
 /// bearer. Pair with [`oauth_credential_ops`].

@@ -299,7 +299,7 @@ impl SettingsModalState {
         &self.filtered_cache
     }
 
-    /// Rebuild rows from current process gates (voice / kitty / minimal).
+    /// Rebuild rows from current process gates (kitty / minimal).
     /// Keeps focus on the same key when possible; exits sub-panes if the key vanished.
     pub fn rebuild_rows(&mut self) {
         let prev_key = self.focused_setting().map(|(k, _)| k);
@@ -809,25 +809,8 @@ pub(super) fn compute_filtered(
     result
 }
 
-/// Row visibility: voice rows need the voice gate; capture needs key releases;
 /// `hidden_in_minimal` rows are dropped in minimal mode. Pure for unit tests.
-pub(super) fn setting_row_visible(
-    meta: &SettingMeta,
-    kitty_releases: bool,
-    minimal: bool,
-    voice_mode: bool,
-) -> bool {
-    if !voice_mode
-        && matches!(
-            meta.key,
-            "voice_keybind_enabled" | "voice_capture_mode" | "voice_stt_language"
-        )
-    {
-        return false;
-    }
-    if meta.key == "voice_capture_mode" && !kitty_releases {
-        return false;
-    }
+pub(super) fn setting_row_visible(meta: &SettingMeta, minimal: bool) -> bool {
     if minimal && meta.hidden_in_minimal {
         return false;
     }
@@ -835,9 +818,7 @@ pub(super) fn setting_row_visible(
 }
 
 fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
-    let kitty_releases = crate::app::kitty_releases_reported();
     let minimal = crate::app::minimal_mode_active();
-    let voice_mode = crate::app::voice_mode_enabled();
     // Keys that belong to a group sub-sheet are rendered only inside that
     // sheet, never as their own top-level rows.
     let group_children: std::collections::HashSet<SettingKey> = registry
@@ -857,7 +838,7 @@ fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
             if meta.category != *cat {
                 continue;
             }
-            if !setting_row_visible(meta, kitty_releases, minimal, voice_mode) {
+            if !setting_row_visible(meta, minimal) {
                 continue;
             }
             if group_children.contains(meta.key) {
@@ -892,7 +873,6 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "contextual_hints.ssh_wrap" => Some(Action::SetContextualHintSshWrap(new)),
         "multiline_mode" => Some(Action::SetMultilineMode(new)),
         "vim_mode" => Some(Action::SetVimMode(new)),
-        "voice_keybind_enabled" => Some(Action::SetVoiceKeybindEnabled(new)),
         "remember_tool_approvals" => Some(Action::SetRememberToolApprovals(new)),
         "toolset.ask_user_question.timeout_enabled" => {
             Some(Action::SetAskUserQuestionTimeoutEnabled(new))
@@ -971,8 +951,6 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         },
         "hunk_tracker_mode" => Some(Action::SetHunkTrackerMode(choice.to_string())),
         "screen_mode" => Some(Action::SetScreenMode(choice.to_string())),
-        "voice_capture_mode" => Some(Action::SetVoiceCaptureMode(choice.to_string())),
-        "voice_stt_language" => Some(Action::SetVoiceSttLanguage(choice.to_string())),
         "render_mermaid" => {
             crate::appearance::RenderMermaid::from_canonical(choice).map(Action::SetRenderMermaid)
         }
@@ -1078,8 +1056,8 @@ pub(super) fn validate_string(
 ///
 /// The chooser already scrolls within the viewport when the focused choice
 /// falls off-screen (`picker_scroll_offset`); this limit exists so catalogs
-/// stay intentionally curated rather than unbounded. Sized to fit the full
-/// Grok STT language list (25 codes + client-only `auto` = 26) with headroom.
+/// stay intentionally curated rather than unbounded, with deliberate headroom
+/// for future local enum settings.
 pub(crate) const MAX_PICKER_CHOICES: usize = 32;
 
 /// The children of a group setting, or an empty slice if `key` is not a group.
@@ -1091,17 +1069,14 @@ pub(super) fn group_children(state: &SettingsModalState, key: SettingKey) -> &'s
 }
 
 /// Whether `(key, canonical)` is gated off and must not be offered as a choice:
-/// `permission_mode`'s "auto" when the auto gate is off, and
-/// `voice_capture_mode`'s "hold" without key-release reporting. Pure (gates
-/// passed as args) so it's unit-testable without touching process globals.
+/// `permission_mode`'s "auto" when the auto gate is off. Pure (gates passed as
+/// args) so it's unit-testable without touching process globals.
 pub(super) fn enum_choice_gated_off(
     key: SettingKey,
     canonical: &str,
     auto_mode_gate: bool,
-    kitty_releases: bool,
 ) -> bool {
-    (key == "permission_mode" && canonical == "auto" && !auto_mode_gate)
-        || (key == "voice_capture_mode" && canonical == "hold" && !kitty_releases)
+    key == "permission_mode" && canonical == "auto" && !auto_mode_gate
 }
 
 /// The effective static Enum choices for a picker, hiding gated-off options so
@@ -1112,11 +1087,8 @@ pub(super) fn effective_enum_choices<'a>(
     choices: &'a [EnumChoice],
     snapshot: &PagerLocalSnapshot,
 ) -> Vec<&'a EnumChoice> {
-    let kitty_releases = crate::app::kitty_releases_reported();
     choices
         .iter()
-        .filter(|c| {
-            !enum_choice_gated_off(key, c.canonical, snapshot.auto_mode_gate, kitty_releases)
-        })
+        .filter(|c| !enum_choice_gated_off(key, c.canonical, snapshot.auto_mode_gate))
         .collect()
 }

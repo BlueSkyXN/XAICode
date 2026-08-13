@@ -128,7 +128,6 @@ fn healthy_report() -> DiagnosticReport {
                 delivery: ClipboardDelivery::Confirmed,
                 fix: None,
             },
-            voice: None,
         },
         findings: Vec::new(),
         probe_notes: Vec::new(),

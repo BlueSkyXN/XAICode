@@ -59,7 +59,7 @@ pub enum PromptCompletionKind {
     /// `MvpAgent::prompt`'s short-circuit and `respond_removed_prompt`.
     RemovedFromQueue,
 }
-/// Successful prompt/turn payload returned to the ACP layer and trace uploaders.
+/// Successful prompt/turn payload returned to the ACP layer.
 #[derive(Debug, Clone)]
 pub struct PromptTurnOk {
     pub stop_reason: acp::StopReason,
@@ -218,8 +218,6 @@ pub enum SessionCommand {
         prompt_blocks: Vec<acp::ContentBlock>,
         /// Prompt mode parsed from request `_meta.mode`.
         prompt_mode: PromptMode,
-        #[allow(private_interfaces)]
-        artifact_upload_ctx: Option<crate::upload::manifest::ArtifactUploadContext>,
         /// Optional client identifier from the prompt request meta (overrides session-level one)
         client_identifier: Option<String>,
         /// Optional screen mode from the prompt request meta (`_meta.screenMode`,
@@ -465,7 +463,7 @@ pub enum SessionCommand {
         server_name: String,
         enabled: bool,
         /// Fully-formed server config to add when re-enabling. Built by the
-        /// caller via `merge_managed_mcp_servers` (with OAuth headers injected).
+        /// caller via the local MCP source merge (with configured OAuth applied).
         /// `None` when disabling.
         server_config: Option<acp::McpServer>,
         respond_to: oneshot::Sender<Result<(), acp::Error>>,
@@ -476,16 +474,11 @@ pub enum SessionCommand {
         server_name: String,
         tool_name: String,
         enabled: bool,
-        is_managed_gateway: bool,
         respond_to: oneshot::Sender<Result<(), acp::Error>>,
     },
     /// Read MCP status: which servers are configured, which clients are healthy, what tools.
     GetMcpStatus {
         respond_to: oneshot::Sender<crate::extensions::mcp::McpStatusSnapshot>,
-    },
-    GetManagedGatewayDisabledTools {
-        respond_to:
-            oneshot::Sender<std::collections::HashMap<String, std::collections::HashSet<String>>>,
     },
     /// Snapshot the session's live MCP client pool for subagent inheritance.
     SnapshotMcpPool {
@@ -809,25 +802,6 @@ pub enum SessionCommand {
     TakeHarnessTraceTurns {
         respond_to:
             oneshot::Sender<Vec<Vec<xai_grok_sampling_types::conversation::ConversationItem>>>,
-    },
-    /// Take and clear the session actor's out-of-band streaming-turn capture.
-    ///
-    /// Returns `Some(...)` when the model streamed reasoning or text in the
-    /// current turn but the canonical assistant response never reached
-    /// `chat_state` (user cancel mid-stream, sampler terminal failure such as
-    /// `MaxTokensTruncation`). The consumer uploads it as
-    /// `streaming_partial.json` for trace inspection; `chat_state` is never
-    /// mutated by this command.
-    ///
-    /// `prompt_id` is passed so the handler can detect a race where a queued
-    /// turn's `StreamStarted` reset the live slot to a different prompt
-    /// between cancel and take. On mismatch the handler emits a
-    /// `tracing::warn!` tripwire and returns `None`; there is no stash, so
-    /// the tail-race data is dropped rather than misattributed.
-    TakeStreamingCapture {
-        prompt_id: String,
-        #[allow(private_interfaces)]
-        respond_to: oneshot::Sender<Option<crate::session::acp_session::StreamingTurnCapture>>,
     },
     /// Persist the current git HEAD commit and branch to summary.json.
     ///

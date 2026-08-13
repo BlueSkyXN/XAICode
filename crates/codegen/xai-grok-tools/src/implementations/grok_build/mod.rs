@@ -15,7 +15,8 @@ pub mod deploy_app;
 pub mod enter_plan_mode;
 pub mod exit_plan_mode;
 pub mod grep;
-pub mod image_edit;
+// Hosted image/video generation modules were removed. The remaining
+// `image_gen`/`video_gen` modules are config-only compatibility carriers.
 pub mod image_gen;
 pub mod kill_task;
 pub mod list_dir;
@@ -39,11 +40,6 @@ pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};
 pub use enter_plan_mode::EnterPlanModeTool;
 pub use exit_plan_mode::ExitPlanModeTool;
 pub use grep::GrepTool;
-pub use image_edit::{IMAGE_EDIT_TOOL_NAME, ImageEditTool};
-pub use image_gen::{
-    IMAGE_GEN_TOOL_NAME, IMAGINE_COMMAND_NAME, ImageGenTool, imagine_instruction,
-    imagine_usage_message,
-};
 pub use kill_task::{KillTaskTool, KillTerminalCommandTool};
 pub use list_dir::ListDirTool;
 pub use lsp::LspTool;
@@ -60,11 +56,6 @@ pub use task::TaskTool;
 pub use task_output::{GetTerminalCommandOutputTool, TaskOutputTool, WaitTasksTool};
 pub use todo::TodoWriteTool;
 pub use update_goal::{UPDATE_GOAL_TOOL_NAME, UpdateGoalTool};
-pub use video_gen::{
-    IMAGE_TO_VIDEO_TOOL_NAME, IMAGINE_VIDEO_COMMAND_NAME, ImageToVideoTool,
-    REFERENCE_TO_VIDEO_TOOL_NAME, ReferenceToVideoTool, imagine_video_instruction,
-    imagine_video_usage_message,
-};
 pub use web_fetch::{WebFetchClient, WebFetchConfig, WebFetchParams, WebFetchTool};
 pub use web_search::WebSearchTool;
 pub use workflow::{WORKFLOW_TOOL_NAME, WorkflowTool};

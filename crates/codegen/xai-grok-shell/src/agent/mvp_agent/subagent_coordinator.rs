@@ -2,7 +2,6 @@
 //! The shared coordinator actor lives in `xai-grok-tools`; this module plugs
 //! its `!Send` local-session runner into `spawn_local`.
 use super::*;
-use crate::session::repo_changes::UploadMethod;
 use xai_grok_tools::implementations::grok_build::task::coordinator;
 struct ShellChildRunner {
     agent_ref: LocalRef<MvpAgent>,
@@ -178,23 +177,6 @@ impl MvpAgent {
             buffered_completion_output_cap: None,
         };
         tokio::task::spawn_local(coordinator::SubagentCoordinator::new(rx, runner, config).run());
-        let (trace_tx, mut trace_rx) = tokio::sync::mpsc::unbounded_channel::<
-            crate::upload::turn::SyntheticTurnTraceRequest,
-        >();
-        self.subagent_presentation.borrow_mut().synthetic_trace_tx = Some(trace_tx);
-        tokio::task::spawn_local({
-            let agent_ref = agent_ref.clone();
-            async move {
-                while let Some(request) = trace_rx.recv().await {
-                    tokio::task::spawn_local({
-                        let agent_ref = agent_ref.clone();
-                        async move {
-                            handle_synthetic_turn_trace(agent_ref, request).await;
-                        }
-                    });
-                }
-            }
-        });
     }
     /// Lightweight context for the `SubagentEvent::ValidateType` drain arm;
     /// tolerates evicted parent sessions (returns built-in defaults + warns).
@@ -268,7 +250,6 @@ impl MvpAgent {
             session_env,
             parent_attribution_callback,
             parent_agent_name,
-            parent_managed_mcp_proxy_base_url,
         ) = {
             let ps = parent_handle.as_ref();
             (
@@ -314,7 +295,6 @@ impl MvpAgent {
                     .unwrap_or_else(|| std::sync::Arc::new(std::collections::HashMap::new())),
                 ps.as_ref().and_then(|h| h.attribution_callback.clone()),
                 ps.as_ref().map(|h| h.agent_name.clone()),
-                ps.as_ref().map(|h| h.managed_mcp_proxy_base_url.clone()),
             )
         };
         let (
@@ -360,25 +340,10 @@ impl MvpAgent {
             .as_ref()
             .map(|h| h.ask_user_question_enabled)
             .unwrap_or_else(|| self.cfg.borrow().resolve_ask_user_question().value);
-        let (gcs_upload_method, gcs_bucket_url) = match self.trace_upload_config_snapshot() {
-            Some(method) => {
-                let bucket = match &method {
-                    UploadMethod::Direct { .. } => self
-                        .cfg
-                        .borrow()
-                        .endpoints
-                        .resolve_trace_bucket_url()
-                        .map(|r| r.value),
-                    UploadMethod::Proxy { .. } => Some("proxy-managed".to_string()),
-                    UploadMethod::S3 { bucket, .. } => Some(format!("s3://{bucket}")),
-                };
-                match bucket {
-                    Some(url) => (Some(method), Some(url)),
-                    None => (None, None),
-                }
-            }
-            None => (None, None),
-        };
+        let parent_non_interactive = parent_handle
+            .as_ref()
+            .map(|h| h.non_interactive)
+            .unwrap_or(false);
         let project_trusted = crate::agent::folder_trust::project_scope_allowed(&parent_cwd);
         let (base_roles, base_personas, subagent_model_overrides, subagent_toggle) = {
             let cfg = self.cfg.borrow();
@@ -404,8 +369,6 @@ impl MvpAgent {
             process_scope: parent_process_scope,
             client_hooks: Default::default(),
             sampling_config: self.sampling_config.borrow().clone(),
-            managed_mcp_proxy_base_url: parent_managed_mcp_proxy_base_url
-                .unwrap_or_else(|| self.cli_chat_proxy_base_url()),
             alpha_test_key: self.alpha_test_key(),
             auth_method_id: self
                 .auth_method_id
@@ -434,13 +397,16 @@ impl MvpAgent {
             memory_config: self.memory_config.clone(),
             web_search_sampling_config: self.prepare_web_search_sampling_config(),
             web_fetch_config: self.prepare_web_fetch_config(),
-            image_gen_config: self.prepare_image_gen_config(),
-            video_gen_config: self.prepare_video_gen_config(),
+            image_gen_config:
+                xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig::Disabled,
+            video_gen_config:
+                xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig::Disabled,
             app_builder_deployer_config: self.prepare_app_builder_deployer_config(),
             write_file_enabled: self.cfg.borrow().resolve_write_file().value,
             goal_enabled: self.cfg.borrow().resolve_goal().value,
             background_workflows_enabled: self.cfg.borrow().resolve_workflows().value,
             ask_user_question_enabled,
+            parent_non_interactive,
             parent_cmd_tx: parent_cmd_tx.clone(),
             parent_session_info: parent_handle.as_ref().map(|h| crate::session::info::Info {
                 id: parent_sid.clone(),
@@ -473,9 +439,7 @@ impl MvpAgent {
                     None
                 }
             },
-            gcs_bucket_url,
             agent_config: Some(self.cfg.borrow().clone()),
-            gcs_upload_method,
             hook_registry: parent_hook_registry,
             permission_handle: parent_handle.as_ref().map(|h| h.permission_handle.clone()),
             worktree_type: self.worktree_type,
@@ -495,7 +459,6 @@ impl MvpAgent {
                 .as_ref()
                 .map(|h| h.mcp_servers.clone())
                 .unwrap_or_default(),
-            managed_mcp_state: self.managed_mcp_cache.clone(),
             parent_mcp_pool: None,
             parent_tool_definitions: None,
             parent_skills: None,
@@ -504,9 +467,6 @@ impl MvpAgent {
             task_completion_reservations: parent_handle
                 .as_ref()
                 .and_then(|h| h.tool_context.task_completion_reservations.clone()),
-            synthetic_trace_tx: parent_handle
-                .as_ref()
-                .and_then(|h| h.tool_context.synthetic_trace_tx.clone()),
             task_output_tool_name: parent_handle
                 .as_ref()
                 .map(|h| h.tool_context.task_output_tool_name.clone())

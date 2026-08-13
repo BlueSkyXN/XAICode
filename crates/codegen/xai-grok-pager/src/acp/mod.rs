@@ -12,6 +12,13 @@ mod version_mismatch;
 
 pub(crate) use version_mismatch::{is_version_mismatch_banner, version_mismatch_banner};
 
+/// Ext methods that carry a session-scoped update and may stamp `isReplay`.
+/// Shared by TUI/headless dispatch and the session-load ACP barrier so a new
+/// method cannot be handled in one path and classified `Unrelated` in the other.
+pub(crate) fn is_session_update_ext_method(method: &str) -> bool {
+    matches!(method, "x.ai/session_notification" | "x.ai/session/update")
+}
+
 use xai_grok_telemetry::startup;
 pub use xai_grok_telemetry::startup::{
     AgentKind, Owner, StartupOutcome, StartupPhase, StartupTimer,
@@ -100,11 +107,11 @@ pub struct AcpConnection {
     /// disabled feature produces zero `x.ai/recap` traffic. Defaults to `false`
     /// when absent (e.g. an older shell that predates the feature).
     pub session_recap_available: bool,
-    /// `AuthManager` for pager-side authenticated channels (voice STT/TTS).
+    /// `AuthManager` for pager-side authenticated channels.
     ///
-    /// In-process mode shares the agent's instance (single token cache); leader
-    /// mode builds a dedicated one off the same local `auth.json`. Either way it
-    /// resolves a fresh bearer per request via the refresh chain.
+    /// In-process mode shares the agent's account-free instance. The retained
+    /// leader compatibility path constructs another account-free manager; no
+    /// production path adopts `auth.json`.
     pub auth_manager: std::sync::Arc<xai_grok_shell::auth::AuthManager>,
 }
 
@@ -347,12 +354,9 @@ pub async fn connect_via_leader(
         )
         .await;
 
-    // Leader mode runs the agent in a separate process, so there's no shared
-    // in-process `AuthManager`. Build a dedicated *non-refreshing* one over the
-    // same `auth.json`: skip `configure_refresher` so only the agent rotates the
-    // token. A second refresher would race rotation and could clear credentials
-    // on failure. This one just reads the valid token, and on expiry adopts the
-    // agent's disk-rotated token under the file lock (`try_adopt_disk_token`).
+    // The retained leader compatibility path has no shared in-process
+    // `AuthManager`. Construct an account-free manager; it neither reads nor
+    // watches the legacy account file.
     let auth_manager = std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new_local(
         &xai_grok_shell::util::grok_home::grok_home(),
         agent_config.grok_com_config.clone(),
@@ -815,6 +819,14 @@ pub fn select_eager_auth_method(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_session_update_ext_method_covers_both_carriers() {
+        assert!(is_session_update_ext_method("x.ai/session_notification"));
+        assert!(is_session_update_ext_method("x.ai/session/update"));
+        assert!(!is_session_update_ext_method("x.ai/task_completed"));
+        assert!(!is_session_update_ext_method("session/update"));
+    }
 
     #[test]
     fn parse_available_commands_from_meta() {

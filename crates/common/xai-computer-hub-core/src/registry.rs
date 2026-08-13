@@ -1,12 +1,11 @@
 //! Object-safe `ToolRegistry` trait shared by every storage plane.
 //!
-//! Two registry implementations are expected: one in-memory plane for
-//! statically-registered local tools, and one connection-keyed plane fed by
-//! incoming remote registrations. Both expose the same trait so the
-//! router can compose them through [`crate::CompoundResolver`] without
-//! caring which is which.
+//! Local callers compose a single in-process registry through
+//! [`crate::CompoundResolver`]. The connection/session-keyed methods remain
+//! as protocol compatibility surface; no remote registry implementation is
+//! shipped by this crate.
 //!
-//! Mutations are connection-scoped: each registered tool belongs to the
+//! The compatibility mutation surface is connection-scoped: each registered tool belongs to the
 //! [`ConnectionId`] that introduced it. Per-tool session bindings live
 //! alongside the tool's record and are mutated independently via
 //! [`ToolRegistry::bind_tool_session`] / [`ToolRegistry::unbind_tool_session`].
@@ -146,8 +145,8 @@ pub trait ToolRegistry: Send + Sync + std::fmt::Debug {
     async fn unregister_server(&self, connection_id: &ConnectionId, server: &ServerId) -> usize;
 
     /// Add `session_id` to the per-tool session set of
-    /// `(connection_id, tool_id)`. The caller (typically the WebSocket
-    /// router) is responsible for verifying that `session_id` is in the
+    /// `(connection_id, tool_id)`. The caller is responsible for verifying
+    /// that `session_id` is in the
     /// connection's bound-session set before calling this method.
     async fn bind_tool_session(
         &self,
@@ -165,9 +164,8 @@ pub trait ToolRegistry: Send + Sync + std::fmt::Debug {
         session_id: &SessionId,
     ) -> ToolSessionUnbindOutcome;
 
-    /// Drop every tool registered by `connection_id`. Used by the WebSocket
-    /// transport on disconnect cleanup. Returns counters describing how
-    /// much state was released.
+    /// Drop every tool registered by `connection_id`. Returns counters
+    /// describing how much compatibility state was released.
     async fn drop_connection(&self, connection_id: &ConnectionId) -> ConnectionCleanupReport;
 
     /// Look up the active resolution for `(session, tool)`.
@@ -193,10 +191,7 @@ pub trait ToolRegistry: Send + Sync + std::fmt::Debug {
 
     /// Drop the binding to `session` from every tool that has it. The
     /// affected tool records are NOT removed — their owning connection
-    /// retains them and may rebind via [`Self::bind_tool_session`]. Called
-    /// by the WebSocket transport when a session ends globally (no peer
-    /// connection still holds the binding) and by the connection actor
-    /// during per-disconnect cleanup.
+    /// retains them and may rebind via [`Self::bind_tool_session`].
     async fn unregister_session(&self, session: &SessionId) -> SessionCleanupReport;
 
     /// Helper: set of session ids currently bound to `(connection_id, tool_id)`.

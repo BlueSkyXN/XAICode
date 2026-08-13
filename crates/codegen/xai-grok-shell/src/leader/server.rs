@@ -20,7 +20,6 @@ use super::protocol::{
 };
 use super::transport::{LeaderListener, LeaderStream};
 use crate::agent::activity::AgentActivity;
-use crate::auth::AuthManager;
 use crate::cpu_profile::{
     ControlError, ControlErrorCode, CpuProfileManager, CpuProfileStartOptions, CpuProfileStatus,
     ShutdownStopDisposition,
@@ -31,8 +30,6 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
-use xai_computer_hub_sdk::{AuthCredential, AuthIdentity, AuthProvider};
-use xai_grok_workspace::WorkspaceHandle;
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Separator for namespacing request IDs. Using pipe character which is:
 /// - Valid in JSON strings (no escaping needed)
@@ -145,8 +142,7 @@ impl LeaderServerControlState {
             workspace: Arc::new(WorkspaceControl::new(None)),
         }
     }
-    pub(crate) fn with_default_hub_url(mut self, default_hub_url: Option<String>) -> Self {
-        self.workspace = Arc::new(WorkspaceControl::new(default_hub_url));
+    pub(crate) fn with_default_hub_url(self, _default_hub_url: Option<String>) -> Self {
         self
     }
     fn leader_capabilities(&self) -> LeaderCapabilities {
@@ -155,126 +151,22 @@ impl LeaderServerControlState {
             control_v1: true,
             runtime_cpu_profile: manager.runtime_cpu_profile(),
             profile_formats: manager.profile_formats().to_vec(),
-            workspace_exposure: cfg!(test),
+            workspace_exposure: false,
             relaunch_v1: true,
         }
     }
 }
-pub struct WorkspaceControl {
-    default_hub_url: Option<String>,
-    /// Hub credential, wired to the leader's `AuthManager` once auth is ready.
-    /// A `watch` so a starting leader (socket up, auth pending) can be awaited
-    /// instead of failing the command.
-    auth: tokio::sync::watch::Sender<Option<Arc<dyn AuthProvider>>>,
-    /// Serializes mutating commands (start/pause/resume/stop) so their long
-    /// awaits (drain, reconnect) never interleave.
-    lock: tokio::sync::Mutex<()>,
-    /// Current exposure, published for lock-free reads so `status` never
-    /// blocks behind an in-flight drain/reconnect.
-    exposure: arc_swap::ArcSwapOption<WorkspaceExposure>,
-}
+/// Compatibility carrier for legacy workspace-control wire commands.
+///
+/// The local shell no longer exposes a hosted computer-hub workspace.  The
+/// protocol types remain parseable so older clients receive a structured
+/// disabled response instead of changing the IPC schema.
+#[derive(Debug, Default)]
+pub struct WorkspaceControl;
 impl WorkspaceControl {
-    fn new(default_hub_url: Option<String>) -> Self {
-        Self {
-            default_hub_url,
-            auth: tokio::sync::watch::channel(None).0,
-            lock: tokio::sync::Mutex::new(()),
-            exposure: arc_swap::ArcSwapOption::empty(),
-        }
+    fn new(_default_hub_url: Option<String>) -> Self {
+        Self
     }
-    /// Wire the hub credential to the leader's shared `AuthManager` (sole
-    /// owner of refresh + persistence).
-    pub(crate) fn set_auth_manager(&self, auth_manager: Arc<AuthManager>) {
-        self.auth.send_replace(Some(Arc::new(LeaderAuthProvider {
-            auth_manager,
-            refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        })));
-    }
-}
-impl std::fmt::Debug for WorkspaceControl {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkspaceControl")
-            .field("default_hub_url", &self.default_hub_url)
-            .finish_non_exhaustive()
-    }
-}
-/// Hub [`AuthProvider`] backed by the leader's `AuthManager`: returns the
-/// current token at each connect/reconnect; never writes auth.json.
-struct LeaderAuthProvider {
-    auth_manager: Arc<AuthManager>,
-    /// One background refresh at a time. `current()` is called by a reconnect
-    /// loop that can spin fast while offline; `refresh_lock` would serialize
-    /// those tasks but not collapse them, so each queued one would still issue
-    /// its own IdP call once the previous released.
-    refresh_in_flight: Arc<std::sync::atomic::AtomicBool>,
-}
-impl std::fmt::Debug for LeaderAuthProvider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LeaderAuthProvider").finish_non_exhaustive()
-    }
-}
-impl AuthProvider for LeaderAuthProvider {
-    fn current(&self) -> AuthCredential {
-        use std::sync::atomic::Ordering;
-        let cached = self.auth_manager.current();
-        if cached.is_none()
-            && self.auth_manager.is_expired()
-            && self
-                .refresh_in_flight
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        {
-            struct ClaimGuard(Arc<std::sync::atomic::AtomicBool>);
-            impl Drop for ClaimGuard {
-                fn drop(&mut self) {
-                    self.0.store(false, std::sync::atomic::Ordering::Release);
-                }
-            }
-            let guard = ClaimGuard(Arc::clone(&self.refresh_in_flight));
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let am = Arc::clone(&self.auth_manager);
-                handle.spawn(async move {
-                    let _guard = guard;
-                    if let Err(e) = am.auth().await {
-                        tracing::debug!(error = %e, "leader hub auth: background refresh failed");
-                    }
-                });
-            }
-        }
-        let token = cached
-            .or_else(|| self.auth_manager.current_or_expired())
-            .map(|a| a.key)
-            .unwrap_or_default();
-        AuthCredential::bearer(token)
-    }
-    /// Owner identity from the leader's `AuthManager`, so the workspace derives
-    /// `WorkspaceIdentity` from this provider instead of a separate auth.json
-    /// read. Mirrors the in-process path (`mvp_agent`): prefer `GrokAuth.team_id`
-    /// (what shell telemetry/snapshot use) mapped onto a `"Team"` principal so
-    /// team attribution is derived; otherwise pass principal fields through.
-    /// `None` when no credential is available (identity resolution never blocks).
-    fn identity(&self) -> Option<AuthIdentity> {
-        let a = self.auth_manager.current_or_expired()?;
-        Some(match a.team_id.filter(|t| !t.is_empty()) {
-            Some(team) => AuthIdentity {
-                user_id: a.user_id,
-                principal_type: Some("Team".to_string()),
-                principal_id: Some(team),
-            },
-            None => AuthIdentity {
-                user_id: a.user_id,
-                principal_type: a.principal_type,
-                principal_id: a.principal_id,
-            },
-        })
-    }
-}
-struct WorkspaceExposure {
-    handle: WorkspaceHandle,
-    hub_url: String,
-    cwd: PathBuf,
-    started_at: Instant,
-    paused: std::sync::atomic::AtomicBool,
 }
 /// Rewrite JSON-RPC request ID **in place** by prefixing with client ID to
 /// avoid collisions.
@@ -406,12 +298,7 @@ fn event_seq_of(json: &serde_json::Value) -> Option<u64> {
 ///   connectors then "disappeared" from every other client's `/mcp` view.
 ///   Broadcast is safe: the pager handler only debounce-refetches `mcp/list`
 ///   for agents with an open extensions modal.
-/// - `x.ai/announcements/update` — the announcements list changed (startup
-///   one-shot or the periodic settings refresh). Session-agnostic; every
-///   client renders its own banner, so last-active-client fallback would
-///   leave every other client's banner stale. Broadcast is safe: the pager
-///   handler is idempotent and drops stale generations via its `gen` gate.
-///   (`x.ai/settings/update` stays non-broadcast — it carries auth/gate state.)
+/// (`x.ai/settings/update` stays non-broadcast — it carries settings state.)
 ///
 /// Matched via [`method_of`], NOT the raw top-level `method`: agent ext
 /// notifications arrive `_`-prefixed on the wire (`_x.ai/sessions/changed`),
@@ -419,12 +306,7 @@ fn event_seq_of(json: &serde_json::Value) -> Option<u64> {
 fn is_machine_wide_broadcast_notification(json: &serde_json::Value) -> bool {
     matches!(
         method_of(json),
-        Some(
-            "x.ai/sessions/changed"
-                | "x.ai/models/update"
-                | "x.ai/mcp/servers_updated"
-                | "x.ai/announcements/update"
-        )
+        Some("x.ai/sessions/changed" | "x.ai/models/update" | "x.ai/mcp/servers_updated")
     )
 }
 /// Whether a payload is the `x.ai/scheduled_task_inject_prompt` notification.
@@ -997,10 +879,11 @@ fn leader_info_payload(control_state: &LeaderServerControlState) -> ControlPaylo
         profile_formats: manager.profile_formats().to_vec(),
     }
 }
-// Hosted computer-hub workspaces are disabled in the clean build. Keep a
-// non-routable sentinel for legacy leader code that still reads this symbol.
-const PROD_COMPUTER_HUB_URL: &str = "ws://127.0.0.1:0/disabled-computer-hub";
-const WORKSPACE_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+// Hosted computer-hub workspace exposure is intentionally absent from the
+// local shell.  Keep the control handlers so the existing IPC wire commands
+// receive a deterministic structured response.
+const HOSTED_WORKSPACE_DISABLED: &str =
+    "hosted workspace exposure is disabled in the clean local build";
 fn workspace_err(message: impl Into<String>) -> ControlError {
     ControlError {
         code: ControlErrorCode::InternalError,
@@ -1008,255 +891,46 @@ fn workspace_err(message: impl Into<String>) -> ControlError {
         details: None,
     }
 }
-/// Resolve the hub credential, waiting if the leader is still wiring auth
-/// (the IPC socket comes up first). Resolves the instant auth is wired or the
-/// leader cancels — event-driven, no timeout.
-async fn wait_for_leader_auth(
-    ws: &WorkspaceControl,
-    cancel: &CancellationToken,
-) -> Result<Arc<dyn AuthProvider>, ControlError> {
-    let mut rx = ws.auth.subscribe();
-    let result = tokio::select! {
-        result = rx.wait_for(|v| v.is_some()) => result,
-        _ = cancel.cancelled() => {
-            return Err(workspace_err(
-                "leader is shutting down; cannot expose workspace to the hub",
-            ));
-        }
-    };
-    match result {
-        Ok(guard) => Ok(guard.clone().expect("waited for Some")),
-        Err(_) => Err(workspace_err(
-            "leader is shutting down; cannot expose workspace to the hub",
-        )),
-    }
-}
-fn workspace_server_id() -> String {
-    let raw = gethostname::gethostname()
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    let sanitized: String = raw
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let name = sanitized.trim_matches('-');
-    if name.is_empty() {
-        "grok-workspace".to_string()
-    } else {
-        name.to_string()
-    }
-}
-async fn drain_and_disconnect(handle: &WorkspaceHandle) {
-    let tracker = handle.activity_tracker().clone();
-    tracker.set_draining();
-    if tokio::time::timeout(WORKSPACE_DRAIN_TIMEOUT, tracker.wait_until_drained())
-        .await
-        .is_err()
-    {
-        warn!(
-            active = tracker.total_active(),
-            "workspace drain timed out; disconnecting hub anyway"
-        );
-    }
-    handle.shutdown_hub().await;
-}
-fn build_workspace_status(
-    metadata: &LeaderServerMetadata,
-    exposure: Option<&WorkspaceExposure>,
-) -> ControlPayload {
-    match exposure {
-        None => ControlPayload::WorkspaceStatus {
-            state: "none".to_string(),
-            hub_url: None,
-            cwd: None,
-            uptime_ms: 0,
-            active_tool_calls: 0,
-            sessions: Vec::new(),
-            pid: metadata.pid,
-        },
-        Some(exp) => {
-            let snapshot = exp.handle.activity_tracker().snapshot();
-            let mut sessions = exp.handle.session_ids();
-            sessions.sort();
-            ControlPayload::WorkspaceStatus {
-                state: if exp.paused.load(std::sync::atomic::Ordering::Relaxed) {
-                    "paused"
-                } else {
-                    "running"
-                }
-                .to_string(),
-                hub_url: Some(exp.hub_url.clone()),
-                cwd: Some(exp.cwd.display().to_string()),
-                uptime_ms: exp.started_at.elapsed().as_millis() as u64,
-                active_tool_calls: snapshot.active_tool_calls,
-                sessions,
-                pid: metadata.pid,
-            }
-        }
+fn workspace_status(metadata: &LeaderServerMetadata) -> ControlPayload {
+    ControlPayload::WorkspaceStatus {
+        state: "none".to_owned(),
+        hub_url: None,
+        cwd: None,
+        uptime_ms: 0,
+        active_tool_calls: 0,
+        sessions: Vec::new(),
+        pid: metadata.pid,
     }
 }
 async fn handle_workspace_start(
-    control_state: LeaderServerControlState,
-    hub_url: Option<String>,
-    cwd: String,
-    cancel: CancellationToken,
+    _control_state: LeaderServerControlState,
+    _hub_url: Option<String>,
+    _cwd: String,
+    _cancel: CancellationToken,
 ) -> Result<ControlPayload, ControlError> {
-    if !cfg!(test) {
-        let _ = (control_state, hub_url, cwd, cancel);
-        return Err(workspace_err(
-            "hosted workspace exposure is disabled in the clean local build",
-        ));
-    }
-    let ws = &control_state.workspace;
-    let url_str = hub_url
-        .filter(|u| !u.trim().is_empty())
-        .or_else(|| ws.default_hub_url.clone())
-        .unwrap_or_else(|| PROD_COMPUTER_HUB_URL.to_string());
-    let url = url::Url::parse(&url_str)
-        .map_err(|e| workspace_err(format!("invalid hub url {url_str}: {e}")))?;
-    let cwd_path = PathBuf::from(&cwd);
-    let _serialize = ws.lock.lock().await;
-    if let Some(existing) = ws.exposure.load_full()
-        && !existing.paused.load(Ordering::Relaxed)
-        && existing.cwd == cwd_path
-        && existing.hub_url == url_str
-    {
-        return Ok(build_workspace_status(
-            &control_state.metadata,
-            Some(existing.as_ref()),
-        ));
-    }
-    let allow_insecure_ws =
-        url.scheme() == "ws" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
-    let status_config = xai_grok_workspace::StatusConfig::from_env();
-    let alpha_test_key = None;
-    let auth = wait_for_leader_auth(ws, &cancel).await?;
-    let server_id = workspace_server_id();
-    let metadata = serde_json::json!({
-        "source": "grok-workspace",
-        "hostname": gethostname::gethostname().to_string_lossy(),
-        "cwd": cwd_path.display().to_string(),
-    });
-    let upload_queue_enabled =
-        std::env::var("GROK_WORKSPACE_UPLOAD_QUEUE_ENABLED").as_deref() != Ok("false");
-    crate::agent::folder_trust::resolve_and_record(&cwd_path, None, false);
-    let project_lsp_trusted = crate::agent::folder_trust::project_scope_allowed(&cwd_path);
-    let handle = xai_grok_workspace::connect_local_workspace(
-        cwd_path.clone(),
-        url,
-        auth,
-        Some(metadata),
-        Some(server_id),
-        alpha_test_key,
-        allow_insecure_ws,
-        status_config,
-        upload_queue_enabled,
-        project_lsp_trusted,
-        None,
-        false,
-        false,
-    )
-    .await
-    .map_err(|e| workspace_err(format!("failed to connect workspace to hub: {e}")))?;
-    let exposure = Arc::new(WorkspaceExposure {
-        handle,
-        hub_url: url_str,
-        cwd: cwd_path,
-        started_at: Instant::now(),
-        paused: AtomicBool::new(false),
-    });
-    let payload = build_workspace_status(&control_state.metadata, Some(exposure.as_ref()));
-    if let Some(old) = ws.exposure.swap(Some(exposure)) {
-        drain_and_disconnect(&old.handle).await;
-    }
-    Ok(payload)
+    Err(workspace_err(HOSTED_WORKSPACE_DISABLED))
 }
 async fn handle_workspace_pause(
-    control_state: LeaderServerControlState,
+    _control_state: LeaderServerControlState,
 ) -> Result<ControlPayload, ControlError> {
-    if !cfg!(test) {
-        let _ = control_state;
-        return Err(workspace_err(
-            "hosted workspace exposure is disabled in the clean local build",
-        ));
-    }
-    let ws = &control_state.workspace;
-    let _serialize = ws.lock.lock().await;
-    let Some(exp) = ws.exposure.load_full() else {
-        return Err(workspace_err("no workspace exposure is running"));
-    };
-    if !exp.paused.load(Ordering::Relaxed) {
-        drain_and_disconnect(&exp.handle).await;
-        exp.paused.store(true, Ordering::Relaxed);
-    }
-    Ok(build_workspace_status(
-        &control_state.metadata,
-        Some(exp.as_ref()),
-    ))
+    Err(workspace_err(HOSTED_WORKSPACE_DISABLED))
 }
 async fn handle_workspace_resume(
-    control_state: LeaderServerControlState,
+    _control_state: LeaderServerControlState,
 ) -> Result<ControlPayload, ControlError> {
-    if !cfg!(test) {
-        let _ = control_state;
-        return Err(workspace_err(
-            "hosted workspace exposure is disabled in the clean local build",
-        ));
-    }
-    let ws = &control_state.workspace;
-    let _serialize = ws.lock.lock().await;
-    let Some(exp) = ws.exposure.load_full() else {
-        return Err(workspace_err("no workspace exposure is running"));
-    };
-    if exp.paused.load(Ordering::Relaxed) {
-        exp.handle.activity_tracker().set_active();
-        if let Err(e) = exp.handle.connect_hub().await {
-            exp.handle.activity_tracker().set_draining();
-            return Err(workspace_err(format!("failed to reconnect to hub: {e}")));
-        }
-        exp.paused.store(false, Ordering::Relaxed);
-    }
-    Ok(build_workspace_status(
-        &control_state.metadata,
-        Some(exp.as_ref()),
-    ))
+    Err(workspace_err(HOSTED_WORKSPACE_DISABLED))
 }
 async fn handle_workspace_stop(
     control_state: LeaderServerControlState,
 ) -> Result<ControlPayload, ControlError> {
-    if !cfg!(test) {
-        return Ok(build_workspace_status(&control_state.metadata, None));
-    }
-    let ws = &control_state.workspace;
-    let _serialize = ws.lock.lock().await;
-    if let Some(exp) = ws.exposure.swap(None) {
-        drain_and_disconnect(&exp.handle).await;
-    }
-    Ok(build_workspace_status(&control_state.metadata, None))
+    Ok(workspace_status(&control_state.metadata))
 }
 async fn handle_workspace_status(
     control_state: LeaderServerControlState,
 ) -> Result<ControlPayload, ControlError> {
-    let exposure = control_state.workspace.exposure.load_full();
-    Ok(build_workspace_status(
-        &control_state.metadata,
-        exposure.as_deref(),
-    ))
+    Ok(workspace_status(&control_state.metadata))
 }
-async fn finalize_workspace_on_shutdown(control_state: LeaderServerControlState) {
-    let ws = &control_state.workspace;
-    let _serialize = ws.lock.lock().await;
-    if let Some(exp) = ws.exposure.swap(None) {
-        info!("Draining workspace exposure on leader shutdown");
-        drain_and_disconnect(&exp.handle).await;
-    }
-}
+async fn finalize_workspace_on_shutdown(_control_state: LeaderServerControlState) {}
 fn handle_control_command(
     control_state: &LeaderServerControlState,
     command: ControlCommand,
@@ -2845,48 +2519,6 @@ mod tests {
             decide_relaunch_for_update(&control_state, "0.3.0".to_string(), &relaunching),
             Ok(ControlPayload::RelaunchDeclined { .. })
         ));
-    }
-    #[derive(Debug)]
-    struct TestAuth;
-    impl AuthProvider for TestAuth {
-        fn current(&self) -> AuthCredential {
-            AuthCredential::bearer("test-token")
-        }
-    }
-    #[tokio::test]
-    async fn wait_for_leader_auth_returns_when_already_wired() {
-        let ws = WorkspaceControl::new(None);
-        ws.auth.send_replace(Some(Arc::new(TestAuth)));
-        let cancel = CancellationToken::new();
-        let auth = wait_for_leader_auth(&ws, &cancel).await.expect("wired");
-        assert!(matches!(auth.current(), AuthCredential::Bearer { .. }));
-    }
-    #[tokio::test]
-    async fn wait_for_leader_auth_resolves_when_wired_late() {
-        let ws = Arc::new(WorkspaceControl::new(None));
-        let cancel = CancellationToken::new();
-        let waiter = {
-            let ws = ws.clone();
-            let cancel = cancel.clone();
-            tokio::spawn(async move { wait_for_leader_auth(&ws, &cancel).await.is_ok() })
-        };
-        tokio::task::yield_now().await;
-        ws.auth.send_replace(Some(Arc::new(TestAuth)));
-        assert!(waiter.await.unwrap(), "auth wired late should resolve Ok");
-    }
-    #[tokio::test]
-    async fn workspace_start_errors_when_cancelled_before_auth() {
-        let state = default_test_control_state(Path::new("/tmp/grok-ws-auth-test.sock"));
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        let err = handle_workspace_start(state, None, "/tmp".to_string(), cancel)
-            .await
-            .unwrap_err();
-        assert!(
-            err.message.contains("shutting down"),
-            "unexpected error: {}",
-            err.message
-        );
     }
     async fn setup_test_server(
         temp: &TempDir,
@@ -6367,9 +5999,9 @@ mod tests {
     }
     /// `x.ai/mcp/servers_updated` is a machine-wide MCP-catalog notification
     /// with no sessionId (session-agnostic by design); it must broadcast to
-    /// every registered client so managed connectors don't vanish from clients
-    /// that weren't last-active when the post-initialize background fetch
-    /// resolved. Uses the production wire form (`_`-prefixed ext notification
+    /// every registered client so local/plugin servers don't vanish from clients
+    /// that weren't last-active when a source reload resolved. Uses the
+    /// production wire form (`_`-prefixed ext notification
     /// with the real method nested in params).
     #[tokio::test]
     async fn mcp_servers_updated_broadcasts_to_all_clients() {
@@ -6378,7 +6010,7 @@ mod tests {
         let (mut reader_a, _writer_a) = connect_and_register(&sock_path, "client-a").await;
         let (mut reader_b, _writer_b) = connect_and_register(&sock_path, "client-b").await;
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let update = r#"{"jsonrpc":"2.0","method":"_x.ai/mcp/servers_updated","params":{"method":"x.ai/mcp/servers_updated","params":{"mcpServers":[{"name":"grok_com_slack","source":"managed"}]}}}"#;
+        let update = r#"{"jsonrpc":"2.0","method":"_x.ai/mcp/servers_updated","params":{"method":"x.ai/mcp/servers_updated","params":{"mcpServers":[{"name":"grok_com_slack","source":"local"}]}}}"#;
         response_tx.send(update.to_string()).unwrap();
         let got_a = next_acp_payload(&mut reader_a).await;
         let got_b = next_acp_payload(&mut reader_b).await;
@@ -6411,9 +6043,6 @@ mod tests {
             r#"{"jsonrpc":"2.0","method":"x.ai/mcp/servers_updated","params":{}}"#
         )));
         assert!(is_machine_wide_broadcast_notification(&pv(
-            r#"{"jsonrpc":"2.0","method":"x.ai/announcements/update","params":{}}"#
-        )));
-        assert!(is_machine_wide_broadcast_notification(&pv(
             r#"{"jsonrpc":"2.0","method":"_x.ai/sessions/changed","params":{}}"#
         )));
         assert!(is_machine_wide_broadcast_notification(&pv(
@@ -6421,9 +6050,6 @@ mod tests {
         )));
         assert!(is_machine_wide_broadcast_notification(&pv(
             r#"{"jsonrpc":"2.0","method":"_x.ai/mcp/servers_updated","params":{"method":"x.ai/mcp/servers_updated","params":{"mcpServers":[]}}}"#
-        )));
-        assert!(is_machine_wide_broadcast_notification(&pv(
-            r#"{"jsonrpc":"2.0","method":"_x.ai/announcements/update","params":{"method":"x.ai/announcements/update","params":{"gen":2,"announcements":[]}}}"#
         )));
         assert!(!is_machine_wide_broadcast_notification(&pv(
             r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s"}}"#

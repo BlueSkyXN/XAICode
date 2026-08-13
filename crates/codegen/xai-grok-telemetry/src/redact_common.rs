@@ -1,5 +1,5 @@
-//! Redaction helpers shared by the **internal** OTLP span pipeline
-//! ([`crate::otel_layer`]) and the **external** customer-collector pipeline
+//! Redaction helpers shared by the **local diagnostics** path and the
+//! **external** customer-collector pipeline
 //! ([`crate::external`]).
 //!
 //! Both pipelines are authoritative privacy chokepoints (see the crate

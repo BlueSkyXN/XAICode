@@ -1,16 +1,29 @@
 # Clean-build change map
 
-This document records the minimal-invasion changes made on top of the original
+This document records the consumer-first changes made on top of the original
 Rust checkout. The source baseline is Git commit
-`afbc0fb710320c7add294c2106d447ecc3e3af2e` (public crate `1.0.0`, monorepo
-`SOURCE_REV` `3e620a76a5f374ce644dc7c87f7e990c68348218`).
+`8a14c91d88875a831a38b3a066b1683116bcb31c` (public crate `1.0.0`, monorepo
+`SOURCE_REV` `27b3c66635e2c0bf213429a36ab916f25d59df20`).
 The machine-readable baseline and binary policy are in [`UPSTREAM.toml`](UPSTREAM.toml).
+
+The direct-child update from `afbc0fb710320c7add294c2106d447ecc3e3af2e`
+was merged with Git's real ancestry base. It imports the upstream session replay,
+non-blocking startup, bounded shutdown, goal/interjection, worktree, `.envrc`,
+subagent-drain, skill-discovery, and local tool fixes. The merge also accepts
+upstream's removal of the legacy `grok_com_*` managed-MCP config client while
+retaining third-party MCP OAuth. The hosted MCP gateway catalog, tool-call
+helpers, product skills client, and session-support crate are absent from this
+source tree; the remaining ACP MCP list/call methods are local/plugin paths.
 
 ## Composition roots and CLI
 
 - `crates/codegen/xai-grok-pager-bin/src/main.rs`
   - Removes startup auth refresh, remote prefetch, managed-policy validation,
-    Sentry, OTLP/firehose initialization, and all update-check/relaunch code.
+    Sentry, hosted firehose initialization, and the active product updater/check/
+    download/relaunch integration.
+    The headless/CLI composition retains generic customer OTLP lifecycle calls,
+    but production config resolution and initialization both return before
+    exporter construction pending a separate product decision.
   - Makes `agent`, `headless`, and the default TUI use local stdio/ACP only.
   - Rejects leader/relay execution, removes login/logout/setup/share/trace/update
     command dispatch, and removes the voice capture subprocess entry point.
@@ -67,12 +80,13 @@ The machine-readable baseline and binary policy are in [`UPSTREAM.toml`](UPSTREA
 - `crates/codegen/xai-grok-shell/src/agent/config.rs`
   - Defaults endpoints to a local OpenAI-compatible base URL and generic env
     names; managed-config resolution is a disabled local sentinel.
-  - Forces account OAuth, telemetry, trace upload, feedback, recap, and voice
-    resolution off in the clean runtime.
+  - Forces account OAuth, hosted telemetry, trace upload, feedback, recap, and
+    voice resolution off in the clean runtime; the separate generic customer
+    OTLP table remains compatible and defaults off.
 - `crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs`
   - Makes remote settings fetch, feedback, trace/diagnostic upload, telemetry
     client construction, image generation, and video generation fail closed
-    even when a stale caller bypasses the normal feature gates.
+    even when a stale hosted caller bypasses the normal feature gates.
 - `crates/codegen/xai-grok-shell/src/agent/init.rs`
   - Makes bootstrap local-only: no remote-settings prefetch, managed policy,
     campaign sync, or auth-refresh model watcher; storage is forced local.
@@ -84,24 +98,24 @@ The machine-readable baseline and binary policy are in [`UPSTREAM.toml`](UPSTREA
   - Replace production inference/assets/relay/gateway and in-process search
     defaults with local loopback sentinels; vendor URLs cannot be inherited
     from the environment/config merge.
-- `crates/codegen/xai-grok-shell/src/relay/sync.rs`, `remote/{client,
-  chat_models_client,conversations_client,workspaces_client}.rs`, and
-  `leader/server.rs`
-  - Hosted share/remote/workspace/leader clients are fail-closed (no relay task,
-    empty share URL, non-routable backend constants, and no hosted computer hub).
-- `crates/codegen/xai-grok-shell/src/agent/session_registry_client.rs`,
-  `remote/agent.rs`, and `agent/chat_modes.rs`
-  - Session-registry, sandbox-management, and hosted chat-mode requests return
-    a local-build-disabled error before auth resolution or network I/O.
+- `crates/codegen/xai-grok-shell/src/relay/sync.rs`,
+  `remote/{chat_models_client,conversations_client,workspaces_client,agent}.rs`, and
+  `agent/chat_modes.rs`
+  - The hosted relay synchronization, model/chat/workspace clients, sandbox agent,
+    and hosted chat-mode implementations are physically absent.
+- `crates/codegen/xai-grok-shell/src/relay/mod.rs`, `remote/client.rs`,
+  `leader/server.rs`, and `agent/session_registry_client.rs`
+  - Compatibility shells remain compiled, but the product composition never starts
+    leader/relay mode and retained remote/session-registry entry points fail before
+    auth resolution or network I/O.
 - `crates/codegen/xai-grok-shell-base/src/util/changelog.rs` and
   `crates/codegen/xai-grok-workspace/src/handle.rs`
   - Changelog reads are cache-only; the hosted workspace connection entry point
-    is fail-closed (local tools use the in-process handle instead).
-- `crates/codegen/xai-grok-workspace/src/bin/workspace_server.rs`
-  - Keeps the upstream binary/argument surface for source compatibility, but
-    changes its identity and default hub to loopback, reports no hosted
-    capabilities, and exits before daemonization, credential loading, remote
-    hub connection, or telemetry initialization.
+    is absent (local tools use the in-process handle instead).
+- `crates/codegen/xai-grok-workspace/src/bin/workspace_server.rs` and its probe
+  - The hosted workspace-server/probe binaries are physically absent. Their
+    configuration and RPC carriers remain parseable for compatibility without
+    a hosted process or socket entry point.
 
 ## TUI/runtime privacy and product surfaces
 
@@ -112,26 +126,31 @@ The machine-readable baseline and binary policy are in [`UPSTREAM.toml`](UPSTREA
   privacy_banner.rs}`, `app/dispatch/status.rs`, and `slash/commands/docs.rs`
   - Remove hosted upgrade/credits/connectors/legal/docs links and turn the stale
     actions into local no-ops or empty link values.
-- `crates/codegen/xai-grok-pager/src/slash/registry.rs`,
-  `slash/commands/{share}.rs`, and `crates/codegen/xai-grok-pager-minimal/src/{auth,welcome}.rs`
-  - Hard-hide account, sharing, voice, media, recap, hosted-product, and
-    login/logout commands even when stale metadata asks to reveal them. The
+- `crates/codegen/xai-grok-pager/src/slash/registry.rs` and
+  `crates/codegen/xai-grok-pager-minimal/src/{auth,welcome}.rs`
+  - The hosted share command implementation is absent. The registry hard-hides
+    retained compatibility commands for account, voice, media, recap, hosted-product,
+    and login/logout even when stale metadata asks to reveal them. The
     local dashboard/session switcher remains feature-flagged and available;
     `/usage` remains available but is local session token/context usage only;
     consumer credits and billing are not shown. The minimal renderer shows
     generic provider setup instead of a browser login.
-- `crates/codegen/xai-grok-pager/src/app/app_view.rs`,
-  `app/acp_handler/settings.rs`, `app/dispatch/billing.rs`, and
-  `app/subscription.rs`
-  - Hide hosted credits/billing, ignore stale billing responses, retain local
-    session usage, and disable the subscription watcher even when old
-    metadata/settings arrive.
+- `crates/codegen/xai-grok-pager/src/app/app_view.rs` and
+  `app/acp_handler/settings.rs`
+  - The billing dispatcher and subscription watcher modules are absent. The retained
+    view/settings compatibility layer clears hosted credit/paywall metadata and keeps
+    local session usage when old wire settings arrive.
 - `crates/codegen/xai-grok-pager/src/tracing.rs`, `app/signal_handler.rs`,
-  `src/unified_log.rs`, and `crates/codegen/xai-grok-telemetry/src/{client.rs,
-  external/mod.rs,sentry.rs,session_ctx.rs,unified_log.rs,id.rs}`
-  - Leave local formatter/error cleanup in place but make product telemetry,
-    Sentry, OTLP, Mixpanel, ACP unified-log forwarding, stable machine-ID
-    caching, and shutdown flushing no-ops.
+  `src/unified_log.rs`, and the deleted telemetry paths
+  `crates/codegen/xai-grok-telemetry/src/{client.rs,http.rs,sentry.rs,otel_layer/}`
+  - Remove the hosted telemetry client, Sentry, internal OTLP layer, and
+    account-bearing HTTP shim. Local formatter/error cleanup, local logs,
+    W3C trace context, and stable session correlation remain. The retained
+    `external/` module is a generic customer OTLP compatibility/test surface:
+    its stable `GROK_EXTERNAL_OTEL` switch (with `XAICODE_EXTERNAL_OTEL`
+    accepted as an alias), parser, redaction, and exporter tests remain, but
+    production config resolution and initialization are both inert. No hosted
+    policy or account identity is attached.
 - `crates/codegen/xai-grok-models/default_models.json` and
   `xai-grok-models/src/lib.rs`
   - Replace hosted model defaults/catalog copy with a generic `local-model`
@@ -142,10 +161,9 @@ The machine-readable baseline and binary policy are in [`UPSTREAM.toml`](UPSTREA
     before dispatch. Local session usage, terminal, filesystem, git, MCP,
     plugin, hook, skill, worktree, task, and memory extensions keep the
     original ACP wire names for compatibility and remain in-process.
-- `crates/codegen/xai-grok-voice/src/{config.rs,pipeline.rs,stt/streaming.rs}`
-  - Retains the upstream types for dependency compatibility but makes voice
-    pipeline and STT connection entry points return a local-build-disabled
-    error before microphone/network work.
+- `crates/codegen/xai-grok-voice/src/config.rs`
+  - Retains only the voice configuration carrier for dependency and config
+    compatibility; microphone, audio, bearer, and STT runtime code is absent.
 - `crates/codegen/xai-grok-tools/src/implementations/{grok_build,web_search}`
   - Media clients are disabled at construction; hosted web-search endpoints
     are rejected; the generic web-fetch user agent and default allowlist no
@@ -156,14 +174,14 @@ The machine-readable baseline and binary policy are in [`UPSTREAM.toml`](UPSTREA
     old `x-grok-*`/XAI marker headers in production, while preserving ordinary
     user-supplied provider headers and all three generic API shapes.
 
-- `crates/codegen/xai-file-utils/src/storage_client.rs`, `gcs.rs`, and `s3.rs`
-  - Keep the upstream storage types and local mock seams, but every public
-    remote upload, download, presign, existence-check, and multipart entry
-    point fails before building a production network request.
+- `crates/codegen/xai-file-utils/src/{trace_context.rs,upload_config.rs,workspace_classifier.rs}`
+  - Retains local classifier/W3C trace-context helpers and the inert upload
+    configuration carrier. GCS/S3/storage clients, upload queues,
+    multipart/presign paths, and remote existence checks are physically absent.
 
-- `crates/codegen/xai-grok-pager/src/trace_cmd.rs`
-  - Converts the trace command to local export; direct upload helpers and
-    upload-method resolution are production fail-closed stubs.
+- `crates/codegen/xai-grok-pager/src/memory_trace.rs`
+  - Retains local memory-trace capture/export. The old trace-command module, direct
+    upload helpers, and upload-method resolution are physically absent.
 
 - `crates/codegen/xai-grok-plugin-marketplace/src/lib.rs`,
   `xai-grok-shell/src/extensions/marketplace.rs`, and `xai-grok-shell/src/plugin.rs`
@@ -171,15 +189,16 @@ The machine-readable baseline and binary policy are in [`UPSTREAM.toml`](UPSTREA
     source URLs are disabled. Local marketplace files and explicitly configured
     non-vendor sources still work.
 
-- `crates/codegen/xai-grok-pager/src/trace_cmd.rs`,
+- `crates/codegen/xai-grok-shell/src/session/feedback_manager.rs`,
   `xai-grok-pager/src/app/dispatch/notes.rs`, and the voice crate
-  - Trace upload, feedback submission, hosted voice probing, and provider
-    voice authentication are local-build stubs; trace export remains local.
+  - Hosted trace/feedback upload clients, hosted voice probing, and provider voice
+    authentication are physically absent. The feedback manager writes only to local
+    session persistence; local notes, memory-trace export, and media rendering remain.
 
 - `crates/codegen/xai-grok-pager/src/app/dispatch/tests/mod.rs`
-  - Leaves the upstream hosted billing/paywall tests in the checkout for
-    provenance, but excludes that removed-surface suite from compilation;
-    local `/usage` behavior is covered by the status-dispatch tests.
+  - Hosted upload, billing/paywall, media, and subscription assertions are
+    removed with their production surfaces; local `/usage` behavior and token
+    counts remain covered by local status/session tests.
 
 - `crates/codegen/xai-grok-pager/docs/user-guide/{01-getting-started,02-authentication,04-slash-commands,05-configuration,11-custom-models,14-headless-mode,17-sessions,24-monitoring-usage}.md`
   - Rewrites the supported setup, API-key, local usage, model, headless, and
@@ -206,9 +225,64 @@ deny-list tests, or disabled legacy modules. They are not active provider
 endpoints, login methods, telemetry sinks, or hosted product actions in the
 clean composition roots.
 
-## Original verification limitation
+## Hosted MCP absence and local preservation contract
+
+The source-clean MCP boundary is intentionally consumer-first:
+
+- `xai-grok-shell-session-support` and the remote product skills client are
+  physically absent; no gateway catalog/cache/client or hosted tool dispatch is
+  present in the shell, pager, or tools production paths.
+- `session/mcp_sources.rs` is the neutral local/plugin/client merge seam. Its
+  source precedence, disabled-server handling, folder-trust gate, and plugin
+  OAuth collection remain active. A configured `grok_com_*` name is treated as
+  an ordinary local name by the MCP catalog and pager.
+- `xai-grok-mcp` still owns stdio, HTTP, and SSE transports plus standards-based
+  OAuth for explicitly configured third-party servers. Local sessions,
+  persistence, plugins, skills, and MCP tool registration remain available.
+- The `[managed_mcps]` config carriers and their serde/default/env/precedence
+  behavior remain parseable for compatibility. They are inert without a hosted
+  consumer; this cleanup does not rename `config.toml`, fields, or environment
+  variables.
+
+The read-only maintenance contract checks these absence and preservation
+markers with `python3 scripts/xaicode_maintenance.py check-contract`; use
+`git diff --check` and `cargo fmt --check --all` for source-level validation.
+
+## Computer-hub local boundary
+
+The workspace/computer-hub cleanup is consumer-first as well:
+
+- The workspace client, MCP adapter, hosted workspace server/proxy supervisor,
+  socket/pool/demux/handshake runtime, and SDK donation modules are physically
+  absent. `WorkspaceOps` has only its local filesystem/git/worktree/session
+  implementation; hosted dispatch is not registered.
+- `HubConfig`, workspace RPC DTOs, transport discriminants, auth-provider
+  carriers, and other compatibility shapes remain parseable. No
+  `config.toml` path, field name, serde/default behavior, environment name,
+  merge precedence, or raw roundtrip is changed by this boundary.
+- The SDK retains `LocalRegistry`, `ToolHandle`/`ErasedTool`, local session and
+  default-extension handling, `ToolHarness`, and `ToolServerHandler`/protocol.
+  `xai-grok-mcp` stdio, HTTP, SSE, and third-party OAuth remain available, as
+  do local workspace FS, git, worktree, permission, persistence, and MCP
+  registration.
+
+The cleanup deliberately preserves the existing `config.toml` schema and
+carrier fields, including `[voice]`, `[ui].voice_*`, image/video feature
+settings, and upload/trace compatibility values. Their serde/default/env/merge
+and raw-roundtrip behavior remains intact, but no production client, queue,
+audio pipeline, or remote exporter is constructed from those values.
+
+## Verification boundary
 
 The image used to create the initial clean source did not contain `cargo`, `rustc`, or
-`rustfmt`, so that import was limited to static checks. Subsequent XAICode CI and release
-workflows add focused Cargo checks, tests, and binary smoke tests; their result is separate
-evidence and must be read at the exact candidate commit.
+`rustfmt`, so the recovered import initially had only static evidence. The assembled candidate
+was subsequently validated locally with Homebrew Rust/Cargo 1.97.1: the maintenance contract,
+formatting and patch checks, focused package compilation and lint, composition tests, both
+binary builds and CLI smoke tests, loopback custom-provider success/error paths, query/header
+transport, temporary-home session create/list/search/resume, production `auth.json` no-access,
+and production-inert OTLP behavior all passed.
+
+The repository and CI remain pinned to Rust 1.94.0, which is not installed in this environment.
+GitHub Actions on the exact candidate head, release artifacts, installation, live-provider
+acceptance, and deployment are separate evidence stages and are not implied by these local
+results.

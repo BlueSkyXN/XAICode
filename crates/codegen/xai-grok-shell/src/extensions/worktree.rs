@@ -318,9 +318,7 @@ pub async fn handle(
                 worktree_type_default,
                 req.worktree_type.unwrap_or(worktree_type_default.into()),
             );
-            let registry_client = agent.session_registry_client();
-            let agent_id = xai_grok_telemetry::id::agent_id();
-
+            let registry_client = None;
             to_response(
                 resume_session_in_worktree(
                     &req,
@@ -329,7 +327,7 @@ pub async fn handle(
                     restore_code_default,
                     registry_client.as_ref(),
                     Some(agent.auth_manager.clone()),
-                    &agent_id,
+                    "",
                 )
                 .await,
             )
@@ -361,7 +359,7 @@ pub async fn handle(
         // ── Session rehydration (devbox recovery) ─────────────────────────
         "x.ai/session/rehydrate" => {
             let req = serde_json::from_str::<RehydrateSessionRequest>(args.params.get())?;
-            let registry_client = agent.session_registry_client();
+            let registry_client = None;
 
             to_response(rehydrate_session_in_worktree(&req, ops, registry_client.as_ref()).await)
         }

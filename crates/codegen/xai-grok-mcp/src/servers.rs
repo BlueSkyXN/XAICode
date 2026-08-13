@@ -58,14 +58,6 @@ fn with_extra_root_certificates(mut builder: reqwest::ClientBuilder) -> reqwest:
     builder
 }
 
-/// Normalize an MCP server URL for comparison: strip trailing slashes.
-/// Must match the normalization the host's managed-config layer uses
-/// (e.g. shell's `session::managed_mcp::normalize_url`) so refresh
-/// lookup keys agree.
-fn normalize_url(url: &str) -> String {
-    url.trim_end_matches('/').to_string()
-}
-
 /// Regex for strictest cross-provider tool name validation.
 ///
 /// Requirements across providers:
@@ -832,65 +824,6 @@ impl McpState {
     /// Get current generation (for stale check after async init)
     pub fn generation(&self) -> u64 {
         self.generation
-    }
-
-    /// Replace managed MCP clients whose URL matches a fresh config entry.
-    ///
-    /// Caller passes `(endpoint, headers)` pairs from whatever source it uses
-    /// (e.g. shell's cli-chat-proxy `ManagedMcpConfig` cache). The MCP crate
-    /// stays free of the host's managed-config schema.
-    ///
-    /// Old `Arc<McpClient>` holders (in-flight tool calls) finish naturally;
-    /// new calls look up the fresh client from the map.
-    pub fn refresh_managed_clients<'a, I>(&mut self, fresh_configs: I)
-    where
-        I: IntoIterator<Item = (&'a str, &'a HashMap<String, String>)>,
-    {
-        let fresh_by_url: HashMap<String, (&'a str, &'a HashMap<String, String>)> = fresh_configs
-            .into_iter()
-            .map(|(endpoint, headers)| (normalize_url(endpoint), (endpoint, headers)))
-            .collect();
-
-        for (client_name, client) in &mut self.owned_clients {
-            let Some(client_url) = self.configs.iter().find_map(|cfg| match cfg {
-                acp::McpServer::Http(acp::McpServerHttp { name, url, .. })
-                | acp::McpServer::Sse(acp::McpServerSse { name, url, .. })
-                    if name == client_name =>
-                {
-                    Some(normalize_url(url))
-                }
-                _ => None,
-            }) else {
-                continue;
-            };
-
-            let Some(&(fresh_endpoint, fresh_headers)) = fresh_by_url.get(&client_url) else {
-                continue;
-            };
-            if fresh_headers.is_empty() {
-                continue;
-            }
-            // Rebuilding drops the warm connection and forces a full
-            // re-handshake on next use; skip it when the token is unchanged.
-            if client.http_headers_match(fresh_headers) {
-                continue;
-            }
-
-            let headers = fresh_headers
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            *client = Arc::new(McpClient::new_http(
-                client_name.clone(),
-                HttpConfig {
-                    url: fresh_endpoint.to_string(),
-                    headers,
-                },
-                None,
-                self.meta_config_map.get(client_name.as_str()),
-            ));
-            tracing::info!(server = %client_name, "Refreshed managed MCP client with fresh token");
-        }
     }
 
     /// Look up a client by server name.
@@ -4093,16 +4026,6 @@ fn is_figma_mcp(server_name: &str, url: &str) -> bool {
     if server_name.eq_ignore_ascii_case("figma") {
         return true;
     }
-    // Legacy direct managed name (`grok_com_figma`); newer clients use gateway tools (`managed_mcp_gateway_tools_enabled`).
-    const MANAGED_PREFIX: &str = "grok_com_";
-    if let (Some(prefix), Some(rest)) = (
-        server_name.get(..MANAGED_PREFIX.len()),
-        server_name.get(MANAGED_PREFIX.len()..),
-    ) && prefix.eq_ignore_ascii_case(MANAGED_PREFIX)
-        && rest.eq_ignore_ascii_case("figma")
-    {
-        return true;
-    }
     reqwest::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
@@ -4633,9 +4556,6 @@ mod tests {
     fn is_figma_mcp_matches_name_and_host() {
         assert!(is_figma_mcp("figma", "https://example.com/mcp"));
         assert!(is_figma_mcp("Figma", "https://example.com/mcp"));
-        assert!(is_figma_mcp("grok_com_figma", "https://example.com/mcp"));
-        assert!(is_figma_mcp("GROK_COM_FIGMA", "https://example.com/mcp"));
-        assert!(is_figma_mcp("grok_com_FIGMA", "https://example.com/mcp"));
         assert!(is_figma_mcp("other", "https://mcp.figma.com/mcp"));
         assert!(is_figma_mcp("other", "https://figma.com/mcp"));
         assert!(!is_figma_mcp("linear", "https://mcp.linear.app/mcp"));
@@ -6556,7 +6476,7 @@ mod tests {
         assert!(client.http_config.is_none());
     }
 
-    // ── http_headers_match / refresh_managed_clients guard tests ─────
+    // ── http_headers_match guard tests ─────────────────────────────
 
     #[test]
     fn http_headers_match_compares_full_set_order_insensitively() {
@@ -6628,71 +6548,6 @@ mod tests {
                 .into_iter()
                 .collect();
         assert!(!client.http_headers_match(&headers));
-    }
-
-    #[test]
-    fn refresh_managed_clients_keeps_arc_when_headers_unchanged() {
-        let url = "http://localhost:5000/api/mcp";
-        let mut state = McpState::new(vec![make_http_server("managed", url)]);
-        let config = HttpConfig {
-            url: url.to_string(),
-            headers: vec![("authorization".to_string(), "Bearer t".to_string())],
-        };
-        state.owned_clients.insert(
-            "managed".to_string(),
-            Arc::new(McpClient::new_http(
-                "managed".to_string(),
-                config,
-                None,
-                None,
-            )),
-        );
-        let before = Arc::clone(state.owned_clients.get("managed").unwrap());
-
-        let fresh: HashMap<String, String> =
-            [("authorization".to_string(), "Bearer t".to_string())]
-                .into_iter()
-                .collect();
-        state.refresh_managed_clients(std::iter::once((url, &fresh)));
-
-        let after = state.owned_clients.get("managed").unwrap();
-        assert!(
-            Arc::ptr_eq(&before, after),
-            "unchanged headers must not rebuild the client"
-        );
-    }
-
-    #[test]
-    fn refresh_managed_clients_installs_new_arc_when_headers_differ() {
-        let url = "http://localhost:5000/api/mcp";
-        let mut state = McpState::new(vec![make_http_server("managed", url)]);
-        let config = HttpConfig {
-            url: url.to_string(),
-            headers: vec![("authorization".to_string(), "Bearer old".to_string())],
-        };
-        state.owned_clients.insert(
-            "managed".to_string(),
-            Arc::new(McpClient::new_http(
-                "managed".to_string(),
-                config,
-                None,
-                None,
-            )),
-        );
-        let before = Arc::clone(state.owned_clients.get("managed").unwrap());
-
-        let fresh: HashMap<String, String> =
-            [("authorization".to_string(), "Bearer new".to_string())]
-                .into_iter()
-                .collect();
-        state.refresh_managed_clients(std::iter::once((url, &fresh)));
-
-        let after = state.owned_clients.get("managed").unwrap();
-        assert!(
-            !Arc::ptr_eq(&before, after),
-            "changed headers must install a fresh client"
-        );
-        assert!(after.http_headers_match(&fresh));
     }
 
     // ── reset_transport tests ────────────────────────────────────────

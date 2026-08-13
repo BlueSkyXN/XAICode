@@ -403,7 +403,6 @@ async fn run_forked_rewind_scenario() {
             new_session_id: Some(fork_id.clone()),
             ..Default::default()
         },
-        "test-agent",
         None,
     )
     .await

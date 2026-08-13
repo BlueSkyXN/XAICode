@@ -2357,7 +2357,6 @@ pub(crate) fn render_session_picker(
                     badge: b.badge,
                     badge_color: None,
                     collapsible: b.collapsible,
-                    underline_last_desc: false,
                 })
             })
             .collect();
@@ -2441,7 +2440,6 @@ pub(crate) fn render_session_picker(
             badge: if has_snippet { "match" } else { "" },
             badge_color: Some(theme.accent_user),
             collapsible: true,
-            underline_last_desc: false,
         }));
     }
 

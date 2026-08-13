@@ -1,9 +1,8 @@
-//! Integration test: MockInferenceServer `/v1/settings` endpoint and
-//! remote settings settings refresh infrastructure.
+//! Integration test for the MockInferenceServer `/v1/settings` compatibility
+//! fixture and local settings serialization.
 //!
-//! Tests the mock endpoint directly (no binary needed) and verifies
-//! the `fetch_settings_blocking` client round-trips correctly with
-//! runtime-mutated mock settings.
+//! Tests the mock endpoint directly (no binary needed) and verifies that the
+//! legacy `fetch_settings_blocking` entry remains fail-closed.
 //!
 //! Run locally:
 //! ```bash
@@ -112,48 +111,20 @@ async fn test_settings_endpoint_reflects_runtime_mutations() {
     .await;
 }
 
-/// Verify `fetch_settings_blocking` round-trips through the mock server.
-/// This is the actual client function used by `refresh_remote_settings`.
-#[tokio::test]
-async fn test_fetch_settings_blocking_round_trip() {
-    with_local_set(|| async {
-        let server = MockInferenceServer::start()
-            .await
-            .expect("start mock server");
-
-        // Without settings configured: returns None (404 from mock)
-        let auth = xai_grok_shell::auth::GrokAuth {
-            key: "test-key".into(),
-            ..Default::default()
-        };
-        let result = tokio::task::spawn_blocking({
-            let url = server.url().to_string();
-            let auth = auth.clone();
-            move || xai_grok_shell::remote::fetch_settings_blocking(&url, &auth, None).into_option()
-        })
-        .await
-        .unwrap();
-        assert!(
-            result.is_none(),
-            "Expected None when settings not configured"
-        );
-
-        // With settings configured: returns Some(settings)
-        server.set_settings(RemoteSettings {
-            tips: Some(vec!["fetched_tip".into()]),
-            ..Default::default()
-        });
-        let result = tokio::task::spawn_blocking({
-            let url = server.url().to_string();
-            let auth = auth.clone();
-            move || xai_grok_shell::remote::fetch_settings_blocking(&url, &auth, None).into_option()
-        })
-        .await
-        .unwrap();
-        let settings = result.expect("Expected Some when settings are configured");
-        assert_eq!(settings.tips, Some(vec!["fetched_tip".into()]));
-    })
-    .await;
+/// The compatibility entry point is deliberately fail-closed and does not
+/// construct a hosted request, regardless of the legacy URL or credentials.
+#[test]
+fn test_fetch_settings_blocking_fails_closed() {
+    let auth = xai_grok_shell::auth::GrokAuth {
+        key: "test-key".into(),
+        ..Default::default()
+    };
+    let result = xai_grok_shell::remote::fetch_settings_blocking(
+        "https://legacy.example/settings",
+        &auth,
+        Some("legacy-alpha-key"),
+    );
+    assert!(result.into_option().is_none());
 }
 
 /// Verify the `doom_loop_recovery` settings object survives the

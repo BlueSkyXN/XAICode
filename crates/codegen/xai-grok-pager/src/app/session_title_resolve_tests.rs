@@ -250,11 +250,9 @@ async fn materialization_consumes_pinned_id_after_concurrent_rename() {
 fn pinned_local_ctx() -> crate::app::session_startup::MaterializeCtx {
     crate::app::session_startup::MaterializeCtx {
         has_worktree: false,
-        allow_remote_restore: false,
         chat_mode: false,
         title_resolution: crate::app::session_startup::TitleResolution::PinnedPreSandbox,
         restore_code: false,
-        restore_progress_on_stdout: false,
     }
 }
 

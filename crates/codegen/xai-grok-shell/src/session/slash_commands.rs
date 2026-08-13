@@ -469,8 +469,6 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "hooks-trust",
     "hooks-untrust",
     "howto",
-    "imagine",
-    "imagine-video",
     "import-claude",
     "jump",
     "login",
@@ -527,7 +525,6 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "usage",
     "view-plan",
     "vim-mode",
-    "voice",
     "welcome",
     "workflows",
     "yolo",
@@ -786,8 +783,8 @@ pub(crate) struct ListCommandsRequest {
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
     pub cwd: Option<String>,
-    /// Product lane: `"chat"` filters to Grok Chat / Grok Computer first-party
-    /// skills only. Omitted or any other value keeps the full Build catalog.
+    /// Legacy lane carrier. `"chat"` is rejected by the local composition;
+    /// omitted or any other value uses the local/plugin skill catalog.
     #[serde(default)]
     pub kind: Option<String>,
 }
@@ -799,306 +796,11 @@ pub struct ListCommandsResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
 }
-/// Last successful product catalog shared by ACU, `commands/list(kind=chat)`,
-/// and chat slash resolve. Matched by auth token / user id / team / org so
-/// OIDC enrichment and team switches never leak another context's menu.
-static PRODUCT_SKILLS_CACHE: parking_lot::Mutex<Option<ProductSkillsCacheEntry>> =
-    parking_lot::Mutex::new(None);
-/// Short-lived degraded (user-list failed) catalog. Separate from success cache
-/// so incomplete menus are not pinned for the full success TTL.
-static PRODUCT_SKILLS_DEGRADED_CACHE: parking_lot::Mutex<Option<ProductSkillsCacheEntry>> =
-    parking_lot::Mutex::new(None);
-/// Short-lived total-failure marker so cold ACU/resolve during an outage does
-/// not re-run the full REST ladder every turn.
-static PRODUCT_SKILLS_NEGATIVE_CACHE: parking_lot::Mutex<Option<ProductSkillsIdentityStamp>> =
-    parking_lot::Mutex::new(None);
-/// Coalesce concurrent catalog fetches (ACU + list + resolve) into one REST
-/// ladder. Callers re-check caches after acquiring the gate.
-static PRODUCT_SKILLS_FETCH_GATE: std::sync::OnceLock<tokio::sync::Mutex<()>> =
-    std::sync::OnceLock::new();
-/// Fresh successful catalog is reused without another REST round-trip so ACU,
-/// list, and per-turn resolve do not stampede grok.com.
-const PRODUCT_SKILLS_SUCCESS_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-/// Bounded negative cache for user-list failure (bundled-only). Keeps consumers
-/// from re-paying the full retry ladder during a short outage.
-const PRODUCT_SKILLS_DEGRADED_TTL: std::time::Duration = std::time::Duration::from_secs(10);
-/// Bounded negative cache for total catalog Err (bundled failed after retries).
-const PRODUCT_SKILLS_NEGATIVE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
-/// Locale for product Skills REST. Catalog is English-only today.
-const PRODUCT_SKILLS_LOCALE: &str = "en";
-#[derive(Clone)]
-struct ProductSkillsCacheEntry {
-    auth_key: String,
-    user_id: String,
-    team_id: Option<String>,
-    organization_id: Option<String>,
-    skills: Vec<SkillInfo>,
-    fetched_at: std::time::Instant,
-}
-/// Identity stamp without skills payload (negative / Err cache).
-#[derive(Clone)]
-struct ProductSkillsIdentityStamp {
-    auth_key: String,
-    user_id: String,
-    team_id: Option<String>,
-    organization_id: Option<String>,
-    fetched_at: std::time::Instant,
-}
-fn product_skills_identity_matches(
-    auth_key: &str,
-    user_id: &str,
-    team_id: &Option<String>,
-    organization_id: &Option<String>,
-    auth: &crate::auth::GrokAuth,
-) -> bool {
-    if team_id != &auth.team_id || organization_id != &auth.organization_id {
-        return false;
-    }
-    if !auth.key.is_empty() && auth_key == auth.key {
-        return true;
-    }
-    if !auth.user_id.is_empty() && !user_id.is_empty() && user_id == auth.user_id {
-        return true;
-    }
-    false
-}
-fn product_skills_cache_matches(
-    entry: &ProductSkillsCacheEntry,
-    auth: &crate::auth::GrokAuth,
-) -> bool {
-    product_skills_identity_matches(
-        &entry.auth_key,
-        &entry.user_id,
-        &entry.team_id,
-        &entry.organization_id,
-        auth,
-    )
-}
-fn product_skills_negative_matches(
-    entry: &ProductSkillsIdentityStamp,
-    auth: &crate::auth::GrokAuth,
-) -> bool {
-    product_skills_identity_matches(
-        &entry.auth_key,
-        &entry.user_id,
-        &entry.team_id,
-        &entry.organization_id,
-        auth,
-    )
-}
-fn product_skills_cache_entry(
-    auth: &crate::auth::GrokAuth,
-    skills: Vec<SkillInfo>,
-) -> ProductSkillsCacheEntry {
-    ProductSkillsCacheEntry {
-        auth_key: auth.key.clone(),
-        user_id: auth.user_id.clone(),
-        team_id: auth.team_id.clone(),
-        organization_id: auth.organization_id.clone(),
-        skills,
-        fetched_at: std::time::Instant::now(),
-    }
-}
-/// Success-cache write after a catalog fetch.
-///
-/// Always keys by the **primary** auth identity (user + team/org), even when
-/// the HTTP request succeeded via an untagged recovery credential. That lets
-/// the same team primary hit TTL without re-running the 403 ladder, while
-/// personal (empty team/org) primaries cannot match a team-keyed entry.
-fn product_skills_cache_entry_after_fetch(
-    primary: &crate::auth::GrokAuth,
-    skills: Vec<SkillInfo>,
-    _used_untagged_recovery: bool,
-) -> ProductSkillsCacheEntry {
-    product_skills_cache_entry(primary, skills)
-}
-fn product_skills_negative_stamp(auth: &crate::auth::GrokAuth) -> ProductSkillsIdentityStamp {
-    ProductSkillsIdentityStamp {
-        auth_key: auth.key.clone(),
-        user_id: auth.user_id.clone(),
-        team_id: auth.team_id.clone(),
-        organization_id: auth.organization_id.clone(),
-        fetched_at: std::time::Instant::now(),
-    }
-}
-fn clear_degraded_cache_for_auth(auth: &crate::auth::GrokAuth) {
-    let mut guard = PRODUCT_SKILLS_DEGRADED_CACHE.lock();
-    if let Some(entry) = guard.as_ref()
-        && product_skills_cache_matches(entry, auth)
-    {
-        *guard = None;
-    }
-}
-fn clear_negative_cache_for_auth(auth: &crate::auth::GrokAuth) {
-    let mut guard = PRODUCT_SKILLS_NEGATIVE_CACHE.lock();
-    if let Some(entry) = guard.as_ref()
-        && product_skills_negative_matches(entry, auth)
-    {
-        *guard = None;
-    }
-}
-fn product_skills_fetch_gate() -> &'static tokio::sync::Mutex<()> {
-    PRODUCT_SKILLS_FETCH_GATE.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-#[cfg(test)]
-pub(crate) fn clear_product_skills_cache_for_test() {
-    *PRODUCT_SKILLS_CACHE.lock() = None;
-    *PRODUCT_SKILLS_DEGRADED_CACHE.lock() = None;
-    *PRODUCT_SKILLS_NEGATIVE_CACHE.lock() = None;
-}
-/// Product (grok.com) Skills catalog as SkillInfo rows for slash advertising
-/// and chat-kind slash resolve / skill expansion.
-///
-/// Shared by `list_commands(kind=chat)`, chat-session
-/// `available_commands_update`, and turn/interjection skill resolution.
-/// Never substitutes Build disk skills.
-///
-/// Catalog source is product Skills REST (see `remote::skills_client`), not
-/// gateway `conversation.commands.updated` — one process-local source for ACU
-/// and shell-side resolve without a gateway bridge.
-///
-/// - `Some(skills)` — REST succeeded (possibly empty; empty 200 is authoritative),
-///   a fresh in-TTL success cache hit, a short-TTL degraded (user-list failed)
-///   hit, or a prior successful catalog for **this** auth identity reused after
-///   a transient failure
-/// - `None` — no auth, REST failed with no matching cached catalog, or logout
-pub(crate) async fn product_skill_infos(
-    auth: Option<std::sync::Arc<crate::auth::AuthManager>>,
-) -> Option<Vec<SkillInfo>> {
-    let Some(auth) = auth else {
-        tracing::warn!("product skills: no auth — catalog unavailable");
-        return None;
-    };
-    let grok_auth = match auth.auth().await {
-        Ok(a) => a,
-        Err(err) => {
-            tracing::warn!(error = %err, "product skills: auth unavailable");
-            return None;
-        }
-    };
-    if let Some(skills) = product_skills_cache_lookup(&grok_auth) {
-        return skills;
-    }
-    let _gate = product_skills_fetch_gate().lock().await;
-    if let Some(skills) = product_skills_cache_lookup(&grok_auth) {
-        return skills;
-    }
-    let client = crate::remote::SkillsClient::new(auth);
-    match client.try_list_catalog(PRODUCT_SKILLS_LOCALE).await {
-        Ok((catalog, used_untagged_recovery)) if catalog.user_list_failed => {
-            let skills = catalog.to_skill_infos();
-            {
-                let guard = PRODUCT_SKILLS_CACHE.lock();
-                if let Some(entry) = guard.as_ref()
-                    && product_skills_cache_matches(entry, &grok_auth)
-                {
-                    tracing::warn!(
-                        skill_count = entry.skills.len(),
-                        "product skills: user list failed — reusing last successful catalog"
-                    );
-                    return Some(entry.skills.clone());
-                }
-            }
-            *PRODUCT_SKILLS_DEGRADED_CACHE.lock() = Some(product_skills_cache_entry_after_fetch(
-                &grok_auth,
-                skills.clone(),
-                used_untagged_recovery,
-            ));
-            clear_negative_cache_for_auth(&grok_auth);
-            tracing::warn!(
-                skill_count = skills.len(),
-                used_untagged_recovery,
-                "product skills: user list failed — caching degraded catalog briefly"
-            );
-            Some(skills)
-        }
-        Ok((catalog, used_untagged_recovery)) => {
-            let skills = catalog.to_skill_infos();
-            *PRODUCT_SKILLS_CACHE.lock() = Some(product_skills_cache_entry_after_fetch(
-                &grok_auth,
-                skills.clone(),
-                used_untagged_recovery,
-            ));
-            clear_degraded_cache_for_auth(&grok_auth);
-            clear_negative_cache_for_auth(&grok_auth);
-            Some(skills)
-        }
-        Err(err) => {
-            let cached = PRODUCT_SKILLS_CACHE.lock().clone();
-            if let Some(entry) = cached
-                && product_skills_cache_matches(&entry, &grok_auth)
-            {
-                tracing::warn!(
-                    error = %err,
-                    skill_count = entry.skills.len(),
-                    "product skills: catalog unavailable — reusing last successful catalog"
-                );
-                return Some(entry.skills);
-            }
-            *PRODUCT_SKILLS_NEGATIVE_CACHE.lock() = Some(product_skills_negative_stamp(&grok_auth));
-            tracing::warn!(
-                error = %err,
-                "product skills: catalog unavailable after retries — negative cache"
-            );
-            None
-        }
-    }
-}
-/// `Some(Some(skills))` success/degraded hit, `Some(None)` negative hit, `None` miss.
-fn product_skills_cache_lookup(
-    grok_auth: &crate::auth::GrokAuth,
-) -> Option<Option<Vec<SkillInfo>>> {
-    {
-        let guard = PRODUCT_SKILLS_CACHE.lock();
-        if let Some(entry) = guard.as_ref()
-            && product_skills_cache_matches(entry, grok_auth)
-            && entry.fetched_at.elapsed() < PRODUCT_SKILLS_SUCCESS_TTL
-        {
-            return Some(Some(entry.skills.clone()));
-        }
-    }
-    {
-        let guard = PRODUCT_SKILLS_DEGRADED_CACHE.lock();
-        if let Some(entry) = guard.as_ref()
-            && product_skills_cache_matches(entry, grok_auth)
-            && entry.fetched_at.elapsed() < PRODUCT_SKILLS_DEGRADED_TTL
-        {
-            return Some(Some(entry.skills.clone()));
-        }
-    }
-    {
-        let guard = PRODUCT_SKILLS_NEGATIVE_CACHE.lock();
-        if let Some(entry) = guard.as_ref()
-            && product_skills_negative_matches(entry, grok_auth)
-            && entry.fetched_at.elapsed() < PRODUCT_SKILLS_NEGATIVE_TTL
-        {
-            return Some(None);
-        }
-    }
-    None
-}
-/// Skill source for `available_commands_update` given sticky session kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AcuSkillSource {
-    /// Product REST catalog (`kind: chat`).
-    Product,
-    /// Disk / plugin skills via `SkillManager` (Build).
-    Disk,
-}
-pub(crate) fn acu_skill_source(is_chat_kind: bool) -> AcuSkillSource {
-    if is_chat_kind {
-        AcuSkillSource::Product
-    } else {
-        AcuSkillSource::Disk
-    }
-}
 /// Build the available commands list, optionally scoped to a working directory.
 /// - `Some(cwd)`: full skill discovery (Local + Repo + User) + builtins.
 /// - `None`: builtins + global (User-scoped) skills only.
-/// - `kind == Some("chat")` (feature `chat` only): **product Skills REST
-///   catalog** (same as grok-web) + builtins — not Build disk skills. Without
-///   the feature, returns `Err` (invalid params). Product REST failure still
-///   advertises builtins only (empty product skills).
+/// - `kind == Some("chat")` remains an invalid compatibility request; local
+///   Build skills are never replaced by a hosted catalog.
 pub(crate) async fn list_commands(
     cwd: Option<&str>,
     skills_config: &xai_grok_agent::prompt::skills::SkillsConfig,
@@ -1107,18 +809,10 @@ pub(crate) async fn list_commands(
     compat: xai_grok_tools::types::compat::CompatConfig,
     include_project_workflows: bool,
     kind: Option<&str>,
-    auth: Option<std::sync::Arc<crate::auth::AuthManager>>,
 ) -> Result<ListCommandsResponse, acp::Error> {
     if kind == Some("chat") {
-        {
-            return Err(acp::Error::invalid_params()
-                .data("commands/list kind=\"chat\" requires a chat-enabled binary"));
-        }
-        let skills = product_skill_infos(auth).await.unwrap_or_default();
-        return Ok(ListCommandsResponse {
-            commands: available_commands(&skills, availability, &[]),
-            tools: None,
-        });
+        return Err(acp::Error::invalid_params()
+            .data("commands/list kind=\"chat\" requires a chat-enabled binary"));
     }
     let skills = xai_grok_agent::prompt::skills::list_skills_with_plugins(
         cwd,
@@ -1456,21 +1150,11 @@ pub(super) async fn build_skill_information_for_refs(
                 skill_blocks.push(build_skill_block(&sk.name, &sk.args, &content));
             }
             Err(e) => {
-                let body_less_product =
-                    info.path.contains("://") && info.body.as_ref().is_none_or(|b| b.is_empty());
-                if body_less_product {
-                    tracing::debug!(
-                        skill = %sk.name,
-                        path = %info.path,
-                        "product skill has no local body — skip shell expansion"
-                    );
-                } else {
-                    tracing::warn!(
-                        skill = %sk.name,
-                        error = %e,
-                        "failed to load skill for expansion"
-                    );
-                }
+                tracing::warn!(
+                    skill = %sk.name,
+                    error = %e,
+                    "failed to load local skill for expansion"
+                );
             }
         }
     }
@@ -1632,98 +1316,6 @@ mod tests {
             workflows,
             LoopFireMode::Detached,
         )
-    }
-    #[test]
-    fn acu_skill_source_chat_vs_build() {
-        assert_eq!(acu_skill_source(true), AcuSkillSource::Product);
-        assert_eq!(acu_skill_source(false), AcuSkillSource::Disk);
-    }
-    #[tokio::test(flavor = "current_thread")]
-    async fn product_skill_infos_none_without_auth() {
-        clear_product_skills_cache_for_test();
-        assert!(product_skill_infos(None).await.is_none());
-    }
-    #[test]
-    fn product_skills_cache_matches_identity_and_team() {
-        use crate::auth::{AuthMode, GrokAuth};
-        let base = ProductSkillsCacheEntry {
-            auth_key: "tok-a".into(),
-            user_id: "user-1".into(),
-            team_id: Some("team-a".into()),
-            organization_id: None,
-            skills: vec![],
-            fetched_at: std::time::Instant::now(),
-        };
-        let same = GrokAuth {
-            key: "tok-a".into(),
-            user_id: "user-1".into(),
-            team_id: Some("team-a".into()),
-            auth_mode: AuthMode::Oidc,
-            create_time: chrono::Utc::now(),
-            ..Default::default()
-        };
-        assert!(product_skills_cache_matches(&base, &same));
-        let other_team = GrokAuth {
-            team_id: Some("team-b".into()),
-            ..same.clone()
-        };
-        assert!(!product_skills_cache_matches(&base, &other_team));
-        let same_user_other_key = GrokAuth {
-            key: "tok-b".into(),
-            user_id: "user-1".into(),
-            team_id: Some("team-a".into()),
-            auth_mode: AuthMode::WebLogin,
-            create_time: chrono::Utc::now(),
-            ..Default::default()
-        };
-        assert!(product_skills_cache_matches(&base, &same_user_other_key));
-        let other_user = GrokAuth {
-            key: "tok-c".into(),
-            user_id: "user-2".into(),
-            team_id: Some("team-a".into()),
-            auth_mode: AuthMode::Oidc,
-            create_time: chrono::Utc::now(),
-            ..Default::default()
-        };
-        assert!(!product_skills_cache_matches(&base, &other_user));
-        let personal_same_user = GrokAuth {
-            key: "tok-personal".into(),
-            user_id: "user-1".into(),
-            team_id: None,
-            organization_id: None,
-            auth_mode: AuthMode::WebLogin,
-            create_time: chrono::Utc::now(),
-            ..Default::default()
-        };
-        assert!(!product_skills_cache_matches(&base, &personal_same_user));
-    }
-    #[test]
-    fn product_skills_cache_after_untagged_recovery_keeps_primary_tenant() {
-        use crate::auth::{AuthMode, GrokAuth};
-        let primary = GrokAuth {
-            key: "oidc-team".into(),
-            user_id: "user-1".into(),
-            team_id: Some("team-a".into()),
-            organization_id: Some("org-1".into()),
-            auth_mode: AuthMode::Oidc,
-            create_time: chrono::Utc::now(),
-            ..Default::default()
-        };
-        let entry = product_skills_cache_entry_after_fetch(&primary, vec![], true);
-        assert_eq!(entry.team_id.as_deref(), Some("team-a"));
-        assert_eq!(entry.organization_id.as_deref(), Some("org-1"));
-        assert_eq!(entry.user_id, "user-1");
-        assert!(product_skills_cache_matches(&entry, &primary));
-        let personal = GrokAuth {
-            key: "web-personal".into(),
-            user_id: "user-1".into(),
-            team_id: None,
-            organization_id: None,
-            auth_mode: AuthMode::WebLogin,
-            create_time: chrono::Utc::now(),
-            ..Default::default()
-        };
-        assert!(!product_skills_cache_matches(&entry, &personal));
     }
     fn all_gated() -> CommandAvailability {
         CommandAvailability::all_enabled()
@@ -2314,11 +1906,11 @@ mod tests {
     }
     #[test]
     fn build_tools_meta_serialises_tool_names() {
-        let names = vec!["scheduler_create".to_string(), "image_gen".to_string()];
+        let names = vec!["scheduler_create".to_string(), "read_file".to_string()];
         let v = build_tools_meta(&names);
         assert_eq!(
             serde_json::Value::Object(v),
-            serde_json::json!({"tools": ["scheduler_create", "image_gen"]})
+            serde_json::json!({"tools": ["scheduler_create", "read_file"]})
         );
     }
     #[test]

@@ -24,11 +24,11 @@ use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
 use super::config::ContentGates;
 use super::schema::{Gate, external_allowed_keys, gate_for_key};
 
-/// Shared, tighten-only view of the content gates. The remote kill switch may
-/// force gates off mid-run; the exporters re-read on every export.
+/// Shared, tighten-only view of the content gates. A local shutdown or safety
+/// hook may force gates off mid-run; the exporters re-read on every export.
 pub(crate) type SharedGates = Arc<parking_lot::RwLock<ContentGates>>;
 
-/// Export-health counters (read by the internal `export_health` meta-event).
+/// Export-health counters used only for local diagnostics.
 #[derive(Debug, Default)]
 pub(crate) struct ExportHealth {
     /// Log records dropped by the validator.

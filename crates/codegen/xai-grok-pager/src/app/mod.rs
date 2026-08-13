@@ -33,9 +33,9 @@ pub mod session_startup;
 pub(crate) mod session_title_resolve;
 pub mod status_blocks;
 pub mod subagent;
-pub mod subscription;
 pub(crate) use effects::sanitize_user_error;
 mod event_loop;
+mod exit_timeout;
 pub(crate) mod external_editor;
 mod foreign_sessions;
 mod inline_edit;
@@ -45,6 +45,7 @@ mod modals;
 mod mouse;
 mod queue_edit;
 pub(crate) mod screen_mode_relaunch;
+mod session_load_barrier;
 pub mod signal_handler;
 mod turn_completion;
 mod xt_filter;
@@ -169,105 +170,6 @@ pub(crate) static MOUSE_REPORTING_TOGGLE_ENABLED: AtomicBool = AtomicBool::new(f
 pub(crate) fn mouse_reporting_toggle_enabled() -> bool {
     MOUSE_REPORTING_TOGGLE_ENABLED.load(Ordering::Acquire)
 }
-/// Process-global voice gate for view code without an `AppView`.
-/// Written only by [`crate::app::app_view::AppView::apply_voice_mode_enabled`].
-pub(crate) static VOICE_MODE_ENABLED: AtomicBool = AtomicBool::new(false);
-pub(crate) fn voice_mode_enabled() -> bool {
-    VOICE_MODE_ENABLED.load(Ordering::Acquire)
-}
-/// Test helper for the process-global voice gate.
-pub fn set_voice_mode_enabled_for_test(on: bool) {
-    VOICE_MODE_ENABLED.store(on, Ordering::Release);
-}
-/// Process-global gate for the Ctrl+Space / F8 voice chord, for key-routing
-/// and view code without an `AppView` (`resolve_action`, the cheatsheet).
-/// Default ON. Seeded at startup from `[ui].voice_keybind_enabled` and
-/// updated live by the settings setter; unlike [`VOICE_MODE_ENABLED`] it only
-/// silences the keybinding — `/voice` and the other voice surfaces stay up.
-pub(crate) static VOICE_KEYBIND_ENABLED: AtomicBool = AtomicBool::new(true);
-pub(crate) fn voice_keybind_enabled() -> bool {
-    VOICE_KEYBIND_ENABLED.load(Ordering::Acquire)
-}
-/// Test helper for the process-global voice-keybind gate.
-pub fn set_voice_keybind_enabled_for_test(on: bool) {
-    VOICE_KEYBIND_ENABLED.store(on, Ordering::Release);
-}
-/// `[features] voice_mode` from merged `requirements.toml`.
-pub(crate) fn voice_mode_requirement_pin() -> Option<bool> {
-    xai_grok_config::load_merged_requirements().and_then(|req| {
-        req.get("features")
-            .and_then(|f| f.get("voice_mode"))
-            .and_then(|v| v.as_bool())
-    })
-}
-/// `[features] voice_mode` from effective config (user + managed).
-pub(crate) fn voice_mode_config_value() -> Option<bool> {
-    xai_grok_shell::config::load_effective_config()
-        .ok()
-        .and_then(|cfg| {
-            cfg.get("features")
-                .and_then(|f| f.get("voice_mode"))
-                .and_then(|v| v.as_bool())
-        })
-}
-/// Resolve voice availability.
-///
-/// Precedence: requirements > `GROK_VOICE_MODE` > config/managed
-/// `[features] voice_mode` > remote `voice_mode_enabled` > default on.
-///
-/// When `is_api_key` and the only off-source is remote, force on. Requirement /
-/// env / config `false` still wins.
-pub(crate) fn resolve_voice_mode_enabled(
-    requirement: Option<bool>,
-    config: Option<bool>,
-    remote: Option<bool>,
-    is_api_key: bool,
-) -> bool {
-    use xai_grok_shell::agent::config::{BoolFlag, ConfigSource};
-    let resolved = BoolFlag::env("GROK_VOICE_MODE")
-        .requirement(requirement)
-        .config(config)
-        .feature_flag(remote)
-        .default(true)
-        .resolve();
-    if resolved.value {
-        return true;
-    }
-    is_api_key && resolved.source == ConfigSource::Remote
-}
-/// Resolve from live policy + env + remote + API-key state.
-pub(crate) fn resolve_voice_mode_live(remote: Option<bool>, is_api_key: bool) -> bool {
-    resolve_voice_mode_enabled(
-        voice_mode_requirement_pin(),
-        voice_mode_config_value(),
-        remote,
-        is_api_key,
-    )
-}
-#[cfg(test)]
-mod voice_gate_tests {
-    use super::resolve_voice_mode_enabled;
-    #[test]
-    fn api_key_force_on_over_remote_kill_only() {
-        assert!(resolve_voice_mode_enabled(None, None, Some(false), true));
-        assert!(!resolve_voice_mode_enabled(None, None, Some(false), false));
-    }
-    #[test]
-    fn policy_false_outranks_api_key_force_on() {
-        assert!(!resolve_voice_mode_enabled(
-            Some(false),
-            Some(true),
-            Some(true),
-            true
-        ));
-        assert!(!resolve_voice_mode_enabled(
-            None,
-            Some(false),
-            Some(false),
-            true
-        ));
-    }
-}
 /// Sticky banner shown while mouse reporting is off, telling the user how to
 /// turn it back on. The advertised invocation depends on focus: `Ctrl+R` only
 /// works from scrollback, so the prompt-focused variant points at the
@@ -375,7 +277,7 @@ pub(crate) struct ExitInfo {
     pub session_id: String,
     pub minimal: bool,
     /// Glanceable session tail; `Some` exactly when it should print. The
-    /// presence policy lives at the sole construction site, `make_run_result`.
+    /// presence policy lives at the sole construction site, `finish_run`.
     pub summary: Option<ExitSummary>,
 }
 /// Session tail printed above the resume command on fullscreen quits.
@@ -644,9 +546,7 @@ pub async fn run(args: PagerArgs) -> anyhow::Result<bool> {
     let intent = args
         .session_startup_intent()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let mut materialize_ctx = session_startup::MaterializeCtx::from_pager_args(&args);
-    materialize_ctx.restore_progress_on_stdout =
-        std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let materialize_ctx = session_startup::MaterializeCtx::from_pager_args(&args);
     let materialized = session_startup::materialize_startup(materialize_ctx, intent).await?;
     if args.chat()
         && let session_startup::MaterializedStartup::Resume { session_id, .. } = &materialized
@@ -835,6 +735,7 @@ pub async fn run(args: PagerArgs) -> anyhow::Result<bool> {
             },
         ),
     );
+    let pending_startup = xai_grok_telemetry::startup::PendingStartup::new();
     let timer = xai_grok_telemetry::startup::begin(crate::acp::Owner::Client);
     let connect_result =
         bounded_connect(&cancel, CONNECT_UI_TIMEOUT, primary_target, &timer, async {
@@ -880,9 +781,9 @@ pub async fn run(args: PagerArgs) -> anyhow::Result<bool> {
         Err(f) => {
             timer.emit_telemetry(connect_target, f.outcome, f.timeout_secs, embedded_fallback);
             if f.outcome == crate::acp::StartupOutcome::Cancelled {
-                xai_grok_telemetry::startup::clear();
+                pending_startup.abandon();
             } else {
-                xai_grok_telemetry::startup::report_total(f.outcome);
+                pending_startup.finish(f.outcome);
             }
             crate::unified_log::flush_blocking().await;
             let _ = restore_terminal(terminal, writer_thread, screen_mode);
@@ -910,6 +811,7 @@ pub async fn run(args: PagerArgs) -> anyhow::Result<bool> {
     let result = event_loop::run(
         &mut terminal,
         connection,
+        pending_startup,
         &mut config_watcher,
         &effective_args,
         session_cwd,
@@ -919,6 +821,16 @@ pub async fn run(args: PagerArgs) -> anyhow::Result<bool> {
         writer_event_rx,
     )
     .await;
+    signal_handler::clear_quit_notify();
+    let forced_exit_code = match &result {
+        Ok(run_result) if run_result.quit_for_update || run_result.relaunch.is_some() => None,
+        Ok(_) => Some(0),
+        Err(_) => Some(1),
+    };
+    if let Some(code) = forced_exit_code {
+        exit_timeout::arm(code);
+        exit_timeout::hold_teardown_for_test();
+    }
     crate::unified_log::flush_blocking().await;
     let restore_result = restore_terminal(terminal, writer_thread, screen_mode);
     drop(agent_guard);
@@ -940,6 +852,7 @@ pub async fn run(args: PagerArgs) -> anyhow::Result<bool> {
             }
         }
     }
+    xai_grok_telemetry::external::shutdown();
     match result {
         Ok(run_result) => {
             // Ctrl+U is retained as a harmless local quit key; there is no

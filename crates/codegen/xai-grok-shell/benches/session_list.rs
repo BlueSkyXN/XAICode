@@ -543,7 +543,6 @@ fn summary_ids(summaries: &[Summary]) -> Vec<String> {
 async fn build_local_list_with_delayed_peer(cwd: String) -> UnifiedListResult {
     let local = build_unified_list(
         None,
-        None,
         ListReq {
             cwd: Some(cwd),
             limit: Some(RECENT_LIMIT),
@@ -648,7 +647,6 @@ fn bench_session_list(c: &mut Criterion) {
         |b| {
             b.iter_with_large_drop(|| {
                 black_box(runtime.block_on(build_unified_list(
-                    None,
                     None,
                     ListReq {
                         cwd: Some(black_box(fixture.picker_cwd.clone())),

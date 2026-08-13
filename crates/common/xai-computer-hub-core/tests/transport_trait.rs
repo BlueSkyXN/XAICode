@@ -71,23 +71,6 @@ async fn boxed_transport_compiles_and_dispatches() {
 }
 
 #[tokio::test]
-async fn kind_distinguishes_local_and_remote() {
-    let local = EchoTransport {
-        kind: TransportKind::Local,
-        user: uid("alice"),
-        session: sid("sess-1"),
-    };
-    let remote = EchoTransport {
-        kind: TransportKind::Remote,
-        user: uid("alice"),
-        session: sid("sess-1"),
-    };
-    assert_eq!(local.kind(), TransportKind::Local);
-    assert_eq!(remote.kind(), TransportKind::Remote);
-    assert_ne!(local.kind(), remote.kind());
-}
-
-#[tokio::test]
 async fn authorize_returns_bound_principal() {
     let t = EchoTransport {
         kind: TransportKind::Local,

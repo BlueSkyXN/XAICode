@@ -5,9 +5,9 @@ Rust terminal coding agent. It keeps the original TUI, ACP/stdio transport,
 sessions, worktrees, MCP, plugins, hooks, and workspace tools, while removing
 the hosted account and product-control paths.
 
-The source baseline is upstream Git commit `afbc0fb710320c7add294c2106d447ecc3e3af2e`
+The source baseline is upstream Git commit `8a14c91d88875a831a38b3a066b1683116bcb31c`
 (public crate `1.0.0`, monorepo `SOURCE_REV`
-`3e620a76a5f374ce644dc7c87f7e990c68348218`). XAICode versions this clean composition
+`27b3c66635e2c0bf213429a36ab916f25d59df20`). XAICode versions this clean composition
 independently as `0.2.0`.
 The machine-readable provenance and binary policy are in [`UPSTREAM.toml`](UPSTREAM.toml).
 The composition-root binary is `xaicode`; the historical `xai-grok-pager` binary remains as
@@ -50,15 +50,22 @@ cargo run -p xaicode --bin xaicode
 For ACP clients and scripts, use `xaicode agent stdio` or
 `xaicode agent headless`. Both are local stdio transports.
 
-## What the clean build removes
+## Hosted production paths removed or disabled
 
 - Grok/xAI browser login, logout, OAuth/OIDC, cached `auth.json` sessions, and
   account-specific ACP auth methods.
 - Hosted usage, credits, billing, auto-top-up, subscription/paywall checks, sharing,
   hosted cloud/workspace/leader relay, and product announcements.
-- Sentry, Mixpanel, unified-log forwarding, OTLP exporters, trace uploads,
-  model-catalog prefetch, managed policy, and auto-update startup tasks.
+- Sentry, Mixpanel, unified-log forwarding, hosted/internal OTLP exporters,
+  trace uploads, model-catalog prefetch, managed policy, and auto-update
+  startup tasks. Generic customer OTLP remains only as an inert compatibility
+  and test surface pending a separate product decision.
 - Voice/STT capture and the standalone voice-capture subprocess.
+
+Some legacy wire/configuration types and guarded helper modules remain for upstream and data
+compatibility. Their hosted entry points are not registered by the product composition or return
+before credentials and network I/O; the detailed map distinguishes those shells from physically
+deleted code.
 
 The detailed file-level change map is in [`CLEAN_BUILD.md`](CLEAN_BUILD.md).
 
