@@ -39,8 +39,9 @@ integrate a migration target automatically.
   `xaicode`.
 - Do not add the upstream `grok` launcher, `@xai-official/*` packages, npm `postinstall`, or
   auto-update/install scripts.
-- Do not create or publish a tag/release, push artifacts, or change GitHub permissions/secrets
-  without explicit user authorization.
+- Do not create or move a version tag, change GitHub permissions/secrets, or add installers
+  without explicit user authorization. Once an authorized `v*.*.*` tag is pushed,
+  `release.yml` publishes the GitHub Release automatically.
 - Validation stays `contents: read`; release write permission belongs only to release jobs.
 - A release must align the XAICode Cargo package version, Git tag, `xaicode --version` output,
   provenance documentation, and artifact names.
