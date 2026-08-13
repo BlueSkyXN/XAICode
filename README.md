@@ -13,6 +13,26 @@ The machine-readable provenance and binary policy are in [`UPSTREAM.toml`](UPSTR
 The composition-root binary is `xaicode`; the historical `xai-grok-pager` binary remains as
 a compatibility alias for downstream build and test tooling.
 
+## Install
+
+Pushing a `vX.Y.Z` tag that matches the package version publishes a GitHub Release with:
+
+- `xaicode-aarch64-apple-darwin.tar.gz`
+- `xaicode-x86_64-unknown-linux-gnu.tar.gz`
+
+The current release is [`v0.2.0`](https://github.com/BlueSkyXN/XAICode/releases/tag/v0.2.0).
+Each archive contains only the `xaicode` binary.
+
+```sh
+# Apple Silicon example after downloading the macOS archive
+tar -xzf xaicode-aarch64-apple-darwin.tar.gz
+install -m 0755 xaicode "$HOME/.local/bin/xaicode"
+xaicode --version
+```
+
+Linux GNU x86_64 uses `xaicode-x86_64-unknown-linux-gnu.tar.gz`. There is no npm package,
+Homebrew formula, or in-app auto-update.
+
 ## Local provider setup
 
 The agent speaks to an OpenAI-compatible endpoint. Configure a provider in
