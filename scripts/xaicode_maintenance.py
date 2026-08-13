@@ -1550,6 +1550,9 @@ def check_contract(args: argparse.Namespace) -> int:
         "contents: read" in release and release.count("contents: write") == 1,
         "release write permission must be limited to the publishing job",
     )
+    expect("draft: false" in release, "release workflow must publish a non-draft GitHub Release")
+    expect("draft: true" not in release, "release workflow still marks the GitHub Release as draft")
+    expect("make_latest: true" in release, "release workflow does not mark the published tag as latest")
 
     if os.environ.get("GITHUB_REF_TYPE") == "tag":
         expected_tag = f"v{product['version']}"

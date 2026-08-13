@@ -20,9 +20,10 @@ paths unreachable.
 
 - Integrated source baseline: `grok-build@8a14c91d88875a831a38b3a066b1683116bcb31c`,
   upstream crate `1.0.0`, `SOURCE_REV` `27b3c66635e2c0bf213429a36ab916f25d59df20`.
-- The XAICode composition package is the `0.2.0` release candidate. The prior rollback tag is
-  `v0.1.1`; no `v0.2.0` tag or release exists until separately authorized. Keep package, future
-  tag, `--version`, provenance, and artifact naming aligned when publishing.
+- The XAICode composition package is `0.2.0`. The prior rollback tag is `v0.1.1`. Pushing a
+  matching `v{product.version}` tag publishes a GitHub Release; creating or moving that tag still
+  requires explicit authorization. Keep package, tag, `--version`, provenance, and artifact
+  naming aligned when publishing.
 - Keep upstream distribution, public source and XAICode product versions separate. The latest
   read-only public-source observation is commit
   `be713136d2a69080743a3f6b3c72077057e5948f`, crate `1.0.1`, `SOURCE_REV`
@@ -102,8 +103,10 @@ limitation; use an already available compatible `PROTOC`/`PROTOC_INCLUDE`, not a
 - On CI failure, inspect the failed GitHub Actions job and logs, make the smallest source fix,
   and rerun CI. Do not silently fall back to a local full build merely to shorten diagnosis.
 - `.github/workflows/release.yml` owns release-profile builds, cross-platform binaries, artifact
-  packaging and draft Release creation. Tagging, manual workflow dispatch, Release creation and
-  deployment still require the separate authorization defined below.
+  packaging, and published GitHub Release creation on `v*.*.*` tags. Pushing a version tag is the
+  human publish gate; the workflow then publishes the Release automatically. Manual
+  `workflow_dispatch` on a non-tag ref only builds artifacts. Deployment, installers, and
+  credential changes still require separate authorization.
 - If local compilation is explicitly authorized, state the command and expected disk/time cost
   first. Use a task-scoped temporary `CARGO_TARGET_DIR` outside the repository with
   `CARGO_INCREMENTAL=0`; remove only that task-created directory after verification. Never clean
