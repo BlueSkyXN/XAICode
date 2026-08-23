@@ -99,8 +99,10 @@ wire shape、跨平台行为和相关 regression tests。
 ## Intake 流程
 
 1. **固定观察坐标**
-   - 更新现有只读 `grok-build` checkout，记录更新前后 SHA。
-   - 读取 target 的 `SOURCE_REV`、`xai-grok-version` crate version、commit time。
+   - 默认由 `upstream-observation.yml` 在 GitHub Actions 读取 public `origin/main`。只有用户
+     明确授权更新现有本机 `grok-build` checkout 时，才执行本地 fetch/pull 并记录前后 SHA。
+   - 在同一次云端 audit 中读取 target 的 `SOURCE_REV`、`xai-grok-version` crate version、
+     committer time。
    - 用 npm CLI 单独读取 stable/alpha version、publish time、`gitHead`；不推断映射。
    - 先写 observation；此阶段不修改产品源码。
 

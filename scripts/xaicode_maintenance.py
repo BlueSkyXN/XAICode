@@ -73,7 +73,7 @@ def upstream_metadata(repo: Path, base_commit: str, target_commit: str) -> dict[
     crate_version = version_manifest.get("package", {}).get("version")
     if not isinstance(crate_version, str) or not crate_version:
         raise MaintenanceError(f"upstream target {target_commit} has no crate version")
-    commit_time = run_git(repo, "show", "-s", "--format=%aI", target_commit).strip()
+    commit_time = run_git(repo, "show", "-s", "--format=%cI", target_commit).strip()
     commit_count_text = run_git(repo, "rev-list", "--count", f"{base_commit}..{target_commit}")
     return {
         "commit_time": commit_time,
