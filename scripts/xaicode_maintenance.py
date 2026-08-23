@@ -397,6 +397,8 @@ def check_contract(args: argparse.Namespace) -> int:
         "contents: read",
         "audit-upstream",
         "--format json",
+        "${RUNNER_TEMP}/upstream-audit.json",
+        "xaicode_worktree_dirty",
         "actions/upload-artifact@v7",
     ):
         expect(
@@ -411,6 +413,7 @@ def check_contract(args: argparse.Namespace) -> int:
         "cargo check",
         "cargo test",
         "cargo build",
+        "| tee upstream-audit.json",
     ):
         expect(
             forbidden_marker not in observation_workflow,
