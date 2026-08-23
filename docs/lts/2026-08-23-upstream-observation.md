@@ -11,40 +11,42 @@ Release、安装或运行环境。
 | 项目 | 值 |
 |---|---|
 | XAICode integrated upstream | `8a14c91d88875a831a38b3a066b1683116bcb31c` / crate `1.0.0` / `SOURCE_REV` `27b3c66635e2c0bf213429a36ab916f25d59df20` |
-| Previous public observation | `be713136d2a69080743a3f6b3c72077057e5948f` / crate `1.0.1` |
-| Local `grok-build` before pull | `e5fd4816d43260c15ba785f103990c1ed6cea230` / crate `1.0.3` |
-| Public target after `git pull --ff-only` | `19d42e35c07a9c9244f03f6df0c4c353f970d4f9` |
-| Target commit time | `2026-08-19T19:55:30Z` |
-| Target crate / `SOURCE_REV` | `1.0.6` / `7d67deacbeb1c1093fdb4f9bcbfab2630e18a6aa` |
+| Previous fixed public observation | `19d42e35c07a9c9244f03f6df0c4c353f970d4f9` / crate `1.0.6` |
+| Local `grok-build` after the earlier `git pull --ff-only` | `19d42e35c07a9c9244f03f6df0c4c353f970d4f9` / crate `1.0.6` |
+| Cloud-observed public target | `07b2f7144fd5c5c9d3dd1966937a87852d2dbdb8` |
+| Observation / target commit time | `2026-08-23T13:57:01Z` / `2026-08-23T10:48:57Z` |
+| Target crate / `SOURCE_REV` | `1.0.8` / `956313d459bee15ae8f17bf73e0633605e18dddd` |
 | npm stable `latest` | `1.0.5`, published `2026-08-16T00:25:35.078Z`, `gitHead` `5115b46bc909ae5c7f5fc064455197440e796b6b` |
 | npm `alpha` | `1.0.8`, published `2026-08-20T21:16:37.994Z`, `gitHead` `95f4d452703b4d0de2b799e3da2667aac509ee82` |
 | Source/distribution mapping | `unmapped`; neither npm `gitHead` equals the public target |
 
 Public target is a descendant of both the integrated baseline and previous observation. It is
-11 public commits ahead of `8a14c91`, eight ahead of `be71313`, and seven ahead of the local
-checkout before this task.
+12 public commits ahead of `8a14c91`, nine ahead of `be71313`, and one ahead of the local
+`grok-build` checkout. The current refresh was generated in GitHub Actions; it did not fetch or
+execute upstream code locally.
 
 ## 三树规模
 
-`python3 scripts/xaicode_maintenance.py audit-upstream --base 8a14c91... --target 19d42e3...`
+`python3 scripts/xaicode_maintenance.py audit-upstream --base 8a14c91... --target 07b2f714...`
 returned:
 
 | 指标 | 数量 |
 |---|---:|
-| XAICode clean overlay changed paths | 670 |
-| Upstream target changed paths | 1,055 |
-| Both changed / semantic-review set | 301 |
-| XAICode-only | 369 |
-| Upstream-only | 754 |
+| XAICode clean overlay changed paths | 673 |
+| Upstream target changed paths | 1,320 |
+| Both changed / semantic-review set | 364 |
+| XAICode-only | 309 |
+| Upstream-only | 956 |
 
-最大的 overlap area 是 `xai-grok-shell/src` 109、`xai-grok-pager/src` 81、
-`xai-grok-workspace/src` 18、pager docs 17、telemetry 12。完整 Git file-stat 为 1,021 files、
-211,515 insertions、125,308 deletions。这个批次不是适合裸 merge 或 tree overwrite 的小更新。
+最大的 overlap area 是 `xai-grok-shell/src` 127、`xai-grok-pager/src` 98、pager docs 22、
+`xai-grok-workspace/src` 19、telemetry 14。upstream delta 包含 365 个 added、38 个 deleted、
+917 个 modified paths；目标树共有 3,433 个文件。这个批次不是适合裸 merge 或 tree
+overwrite 的小更新。
 
 ## 上游功能摘要与初步分类
 
-下表基于 public source、`1.0.4`–`1.0.6` changelog 和相关实现路径；最终 intake 仍需逐
-commit/hunk 审查。
+下表基于 public source、`1.0.4`–`1.0.6` changelog、`1.0.8` public sync commit 和相关
+实现路径；最终 intake 仍需逐 commit/hunk 审查。
 
 | 功能/变化 | 初步分类 | XAICode 处理 |
 |---|---|---|
@@ -60,6 +62,11 @@ commit/hunk 审查。
 | `grok clone` content store/projected worktree | `defer` | 需要 CLI naming、network/permission、storage/GC 和 rollback 决策；不能发布 `grok` binary |
 | subagent attempt persistence/recovery、ACP lifecycle | `adapt` | 保留 local subagents；逐 stage 审查 persistence codec、rewind、accounting、out-of-order events |
 | removal of subagent `capability_mode` | `defer` | `1.0.6` breaking change；先决定 compatibility strategy 和 agent-type tool policy |
+| custom marketplace CTA、plugin agents、workflow discovery | `adapt` | 保留显式配置的 non-vendor marketplace 和本地 plugin agents；remote subagent bundle 不得成为默认来源 |
+| MCP server-name merge、HTTP transport inference、non-blocking stdio、elicitation、custom CA | `adapt` | 保留第三方 MCP/OAuth 和显式 TLS 配置；不得发送 `grok-cli/*` 品牌 User-Agent 或引入 xAI credential fallback |
+| workflow child effort/budget、subagent retry/concurrency、provider context authority | `adapt` | 保留 XAICode agent budget、custom-provider identity 和 permission contract，单独验证并发、429 与 replay 顺序 |
+| in-process minimal/fullscreen、queued-prompt navigation、copy Markdown、prompt draft | `direct` | 本地 TUI 能力；按现有 XAICode binary、session 和 terminal contract 吸收 |
+| feedback trace/image upload、product analytics、computer hub、scheduler/app-builder deployer | `reject/adapt` | hosted 发送与控制面拒绝；只有可证明为本地、generic 且显式配置的 leaf capability 才能单独评估 |
 | first-launch consent gate/remote consent record | `reject` | 实现读取 remote settings、xAI auth/header 并 POST proxy；保持 production 不可达 |
 | `GROK_FORCE_LOGIN_TEAM_ID` | `reject` | 属于 xAI interactive account login，不进入 XAICode production |
 | `xai-grok-home`、hosted hub/relay/workspace changes | `reject/adapt` | hosted client 拒绝；仅审查并选择 local filesystem/worktree/runtime slice |
@@ -74,8 +81,10 @@ commit/hunk 审查。
 2. `e5fd481 -> 5163763`：`1.0.4` hooks、session search、queue/TUI slice。
 3. `5163763 -> d92c5b0`：`1.0.5` config layering、worktree GC、ACP reasoning slice。
 4. `d92c5b0 -> 19d42e3`：`1.0.6` status line、clone、consent 和 subagent breaking change。
+5. `19d42e3 -> 07b2f714`：`1.0.8` plugin/MCP/workflow/TLS/TUI 增量，以及必须隔离的
+   feedback/analytics/hub/deployer hosted 增量。
 
-实际 merge 默认按 11 个 public first-parent commits 逐段进行；上面只表示 review/release
+实际 merge 默认按 12 个 public first-parent commits 逐段进行；上面只表示 review/release
 边界，不能直接把一个版本范围当作单次无审查 merge。
 
 ## 当前结论

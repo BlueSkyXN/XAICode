@@ -20,13 +20,14 @@ paths unreachable.
 
 - Integrated source baseline: `grok-build@8a14c91d88875a831a38b3a066b1683116bcb31c`,
   upstream crate `1.0.0`, `SOURCE_REV` `27b3c66635e2c0bf213429a36ab916f25d59df20`.
-- The XAICode composition package is the `0.2.0` release candidate. The prior rollback tag is
-  `v0.1.1`; no `v0.2.0` tag or release exists until separately authorized. Keep package, future
-  tag, `--version`, provenance, and artifact naming aligned when publishing.
+- The XAICode composition package is `0.2.0`. The prior rollback tag is `v0.1.1`; the current
+  latest Release is `v0.2.0`. Creating or moving a version tag, publishing a Release, installing,
+  or deploying still requires explicit authorization. Keep package, tag, `--version`, provenance,
+  and artifact naming aligned when publishing.
 - Keep upstream distribution, public source and XAICode product versions separate. The latest
   read-only public-source observation is commit
-  `19d42e35c07a9c9244f03f6df0c4c353f970d4f9`, crate `1.0.6`, `SOURCE_REV`
-  `7d67deacbeb1c1093fdb4f9bcbfab2630e18a6aa`, 11 commits ahead of the integrated baseline.
+  `07b2f7144fd5c5c9d3dd1966937a87852d2dbdb8`, crate `1.0.8`, `SOURCE_REV`
+  `956313d459bee15ae8f17bf73e0633605e18dddd`, 12 commits ahead of the integrated baseline.
   npm's stable `latest` tag points to `1.0.5` with a different `gitHead`; its `alpha` tag points
   to `1.0.8`, also without an exact public-commit mapping. Anchor syncs to an exact public commit,
   never an npm label alone.

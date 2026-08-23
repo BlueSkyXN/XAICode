@@ -31,16 +31,16 @@ map exactly to the public source commit.
 
 ### Later upstream observation
 
-A read-only check on `2026-08-23T07:14:19Z` found public upstream `main` at
-`19d42e35c07a9c9244f03f6df0c4c353f970d4f9`, 11 commits ahead of this integrated target. That
-commit records `SOURCE_REV` `7d67deacbeb1c1093fdb4f9bcbfab2630e18a6aa` and crate `1.0.6`.
+A read-only GitHub Actions check on `2026-08-23T13:57:01Z` found public upstream `main` at
+`07b2f7144fd5c5c9d3dd1966937a87852d2dbdb8`, 12 commits ahead of this integrated target. That
+commit records `SOURCE_REV` `956313d459bee15ae8f17bf73e0633605e18dddd` and crate `1.0.8`.
 The npm stable `latest` tag is `1.0.5` and npm `alpha` is `1.0.8`; their `gitHead` values do not
 map exactly to the observed public commit.
 
-Those 11 commits are not part of the integrated XAICode source. They require a new incremental
-migration with a fresh three-tree review: 1,055 upstream paths changed, 301 overlap the XAICode
-clean overlay, and upstream `1.0.6` contains a breaking subagent contract change. The fixed
-observation and initial feature classification are in
+Those 12 commits are not part of the integrated XAICode source. They require a new incremental
+migration with a fresh three-tree review: 1,320 upstream paths changed, 364 overlap the XAICode
+clean overlay, and the range through upstream `1.0.8` contains a breaking subagent contract
+change. The fixed observation and initial feature classification are in
 [`docs/lts/2026-08-23-upstream-observation.md`](docs/lts/2026-08-23-upstream-observation.md).
 
 ## Product boundary
@@ -259,7 +259,7 @@ Stop rather than weakening the product boundary if:
 
 - Rollback anchor: `main@e2afb878cf56cf3ec8235a0fa58e76960454fe3a`.
 - Integrated anchor: `main@7dec356645be0b61c34d074c9fbaa4be246e5153`, tag and Release `v0.2.0`.
-- The later `19d42e3` observation changes provenance records only; it does not import upstream
+- The later `07b2f714` observation changes provenance records only; it does not import upstream
   source, alter live data or credentials, create a product tag, install, or deploy anything.
 - Every future intake uses a new isolated branch/worktree and the LTS runbook. Merge, tag,
   Release, installation, and deployment remain separately authorized and independently verified.
