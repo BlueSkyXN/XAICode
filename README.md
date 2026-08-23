@@ -89,9 +89,17 @@ The audit is read-only and uses committed Git trees. Pass `--target <commit>` to
 recorded candidate, `--format json` for automation, or `--list-paths` to include every path
 changed by both XAICode and upstream.
 
-The current phased migration, validation, stop, and rollback plan is in
-[`UPSTREAM_MIGRATION.md`](UPSTREAM_MIGRATION.md). Its machine-readable status and fixed target are
-recorded in `UPSTREAM.toml`.
+The completed `1.0.0` migration, validation, stop, and rollback record is in
+[`UPSTREAM_MIGRATION.md`](UPSTREAM_MIGRATION.md). Its machine-readable status and integrated
+target are recorded in `UPSTREAM.toml`.
+
+The durable protected-intake process is in
+[`docs/lts/upstream-maintenance.md`](docs/lts/upstream-maintenance.md). Weekly and manual
+observations run read-only in GitHub Actions through `upstream-observation.yml`; they upload a
+three-tree report but never modify product source or open a PR. The current fixed observation is
+[`docs/lts/2026-08-23-upstream-observation.md`](docs/lts/2026-08-23-upstream-observation.md).
+Rust compile, lint, tests, binary smoke, and packaging for an intake candidate are cloud-only on
+the exact pushed SHA.
 
 ## License
 

@@ -282,7 +282,10 @@ binary builds and CLI smoke tests, loopback custom-provider success/error paths,
 transport, temporary-home session create/list/search/resume, production `auth.json` no-access,
 and production-inert OTLP behavior all passed.
 
-The repository and CI remain pinned to Rust 1.94.0, which is not installed in this environment.
-GitHub Actions on the exact candidate head, release artifacts, installation, live-provider
-acceptance, and deployment are separate evidence stages and are not implied by these local
-results.
+The authoritative repository toolchain remains Rust 1.94.0. PR head
+`67dbf6d2eeba8439c38138a6508871554833c07d` and merged
+`main@7dec356645be0b61c34d074c9fbaa4be246e5153` passed the GitHub Actions CI workflow on that
+toolchain; tag `v0.2.0` passed the cloud Release workflow. Those results prove only the integrated
+baseline. Later upstream observations, installation, live-provider acceptance, and deployment
+remain separate evidence stages. Future Rust compilation and tests for LTS intake run only in
+GitHub Actions on the exact candidate SHA.
