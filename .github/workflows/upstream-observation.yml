@@ -100,7 +100,18 @@ jobs:
             --upstream-repo "${UPSTREAM_DIR}" \
             --target "${TARGET_COMMIT}" \
             --format json \
-            --list-paths | tee upstream-audit.json
+            --list-paths | tee "${RUNNER_TEMP}/upstream-audit.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          temporary_path = Path(os.environ["RUNNER_TEMP"]) / "upstream-audit.json"
+          audit = json.loads(temporary_path.read_text(encoding="utf-8"))
+          if audit.get("xaicode_worktree_dirty") is not False:
+              raise SystemExit("XAICode checkout was dirty before observation output was created")
+          Path("upstream-audit.json").write_bytes(temporary_path.read_bytes())
+          PY
 
       - name: Record npm distribution coordinates
         run: |
