@@ -1,0 +1,155 @@
+name: Upstream observation
+
+on:
+  push:
+    branches:
+      - "codex/lts-*"
+      - "codex/upstream-*"
+    paths:
+      - "UPSTREAM.toml"
+      - "docs/lts/**"
+      - "scripts/xaicode_maintenance.py"
+      - ".github/workflows/upstream-observation.yml"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      target_commit:
+        description: "Optional exact 40-character public grok-build commit on origin/main"
+        required: false
+        type: string
+
+concurrency:
+  group: upstream-observation
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    name: "read-only public source audit"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Resolve exact public upstream target
+        id: upstream
+        env:
+          REQUESTED_TARGET: ${{ inputs.target_commit || '' }}
+        run: |
+          set -euo pipefail
+          upstream_dir="${RUNNER_TEMP}/grok-build"
+          upstream_repository="$(python3 - <<'PY'
+          import tomllib
+          with open("UPSTREAM.toml", "rb") as handle:
+              print(tomllib.load(handle)["upstream"]["repository"])
+          PY
+          )"
+          git clone --filter=blob:none --no-checkout --no-tags \
+            "${upstream_repository}" "${upstream_dir}"
+
+          target="$(git -C "${upstream_dir}" rev-parse 'origin/main^{commit}')"
+          if [[ -n "${REQUESTED_TARGET}" ]]; then
+            if [[ ! "${REQUESTED_TARGET}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "target_commit must be a full lowercase SHA-1" >&2
+              exit 1
+            fi
+            git -C "${upstream_dir}" cat-file -e "${REQUESTED_TARGET}^{commit}"
+            if ! git -C "${upstream_dir}" merge-base --is-ancestor \
+              "${REQUESTED_TARGET}" origin/main; then
+              echo "target_commit is not reachable from public origin/main" >&2
+              exit 1
+            fi
+            target="${REQUESTED_TARGET}"
+          fi
+
+          base="$(python3 - <<'PY'
+          import tomllib
+          with open("UPSTREAM.toml", "rb") as handle:
+              print(tomllib.load(handle)["upstream"]["git_commit"])
+          PY
+          )"
+          git -C "${upstream_dir}" cat-file -e "${base}^{commit}"
+          if ! git -C "${upstream_dir}" merge-base --is-ancestor "${base}" "${target}"; then
+            echo "observed target is not a descendant of the integrated upstream base" >&2
+            exit 1
+          fi
+
+          {
+            echo "path=${upstream_dir}"
+            echo "base=${base}"
+            echo "target=${target}"
+            echo "short=${target:0:12}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Generate three-tree observation
+        env:
+          UPSTREAM_DIR: ${{ steps.upstream.outputs.path }}
+          TARGET_COMMIT: ${{ steps.upstream.outputs.target }}
+        run: |
+          set -euo pipefail
+          python3 scripts/xaicode_maintenance.py audit-upstream \
+            --upstream-repo "${UPSTREAM_DIR}" \
+            --target "${TARGET_COMMIT}" \
+            --format json \
+            --list-paths | tee upstream-audit.json
+
+      - name: Record npm distribution coordinates
+        run: |
+          set -euo pipefail
+          npm view @xai-official/grok dist-tags --json > npm-dist-tags.json
+          npm view @xai-official/grok@latest version gitHead --json > npm-latest.json
+          npm view @xai-official/grok@alpha version gitHead --json > npm-alpha.json
+
+      - name: Write job summary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("upstream-audit.json", encoding="utf-8") as handle:
+              audit = json.load(handle)
+          with open("npm-dist-tags.json", encoding="utf-8") as handle:
+              dist_tags = json.load(handle)
+
+          refs = audit["refs"]
+          counts = audit["changed_path_counts"]
+          metadata = audit["upstream_metadata"]
+          lines = [
+              "# XAICode upstream observation",
+              "",
+              f"- Base: `{refs['base']}`",
+              f"- Target: `{refs['target']}`",
+              f"- Target crate: `{metadata['crate_version']}`",
+              f"- Target `SOURCE_REV`: `{metadata['source_rev']}`",
+              f"- Public commits from base: `{metadata['commit_count']}`",
+              f"- Upstream changed paths: `{counts['upstream_delta']}`",
+              f"- XAICode overlap paths: `{counts['overlap']}`",
+              f"- npm stable/alpha: `{dist_tags.get('latest')}` / `{dist_tags.get('alpha')}`",
+              "",
+              "This workflow is observation-only. It did not modify product source, open a PR, "
+              "create a tag, or run upstream code.",
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write("\n".join(lines) + "\n")
+          PY
+
+      - name: Upload observation artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: upstream-observation-${{ steps.upstream.outputs.short }}
+          path: |
+            upstream-audit.json
+            npm-dist-tags.json
+            npm-latest.json
+            npm-alpha.json
+          if-no-files-found: error
+          retention-days: 30

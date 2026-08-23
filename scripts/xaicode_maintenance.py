@@ -50,6 +50,39 @@ def resolve_commit(repo: Path, ref: str) -> str:
     return run_git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").strip()
 
 
+def require_ancestor(repo: Path, ancestor: str, descendant: str) -> None:
+    command = ["git", "-C", str(repo), "merge-base", "--is-ancestor", ancestor, descendant]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode == 0:
+        return
+    if result.returncode == 1:
+        raise MaintenanceError(f"upstream target {descendant} is not a descendant of {ancestor}")
+    detail = result.stderr.strip() or result.stdout.strip() or "unknown git error"
+    raise MaintenanceError(f"{' '.join(command)} failed: {detail}")
+
+
+def upstream_metadata(repo: Path, base_commit: str, target_commit: str) -> dict[str, Any]:
+    source_rev = run_git(repo, "show", f"{target_commit}:SOURCE_REV").strip()
+    version_manifest = tomllib.loads(
+        run_git(
+            repo,
+            "show",
+            f"{target_commit}:crates/codegen/xai-grok-version/Cargo.toml",
+        )
+    )
+    crate_version = version_manifest.get("package", {}).get("version")
+    if not isinstance(crate_version, str) or not crate_version:
+        raise MaintenanceError(f"upstream target {target_commit} has no crate version")
+    commit_time = run_git(repo, "show", "-s", "--format=%aI", target_commit).strip()
+    commit_count_text = run_git(repo, "rev-list", "--count", f"{base_commit}..{target_commit}")
+    return {
+        "commit_time": commit_time,
+        "source_rev": source_rev,
+        "crate_version": crate_version,
+        "commit_count": int(commit_count_text.strip()),
+    }
+
+
 def read_tree(repo: Path, ref: str) -> dict[str, tuple[str, str]]:
     commit = resolve_commit(repo, ref)
     raw = subprocess.run(
@@ -122,10 +155,12 @@ def audit_upstream(args: argparse.Namespace) -> int:
     base_commit = resolve_commit(upstream_repo, base_ref)
     target_commit = resolve_commit(upstream_repo, target_ref)
     xaicode_commit = resolve_commit(repo, args.xaicode_ref)
+    require_ancestor(upstream_repo, base_commit, target_commit)
 
     base_tree = read_tree(upstream_repo, base_commit)
     target_tree = read_tree(upstream_repo, target_commit)
     xaicode_tree = read_tree(repo, xaicode_commit)
+    metadata = upstream_metadata(upstream_repo, base_commit, target_commit)
 
     overlay = changed_paths(base_tree, xaicode_tree)
     upstream_delta = changed_paths(base_tree, target_tree)
@@ -145,6 +180,7 @@ def audit_upstream(args: argparse.Namespace) -> int:
             "target": target_commit,
             "xaicode": xaicode_commit,
         },
+        "upstream_metadata": metadata,
         "file_counts": {
             "base": len(base_tree),
             "target": len(target_tree),
@@ -178,6 +214,12 @@ def audit_upstream(args: argparse.Namespace) -> int:
     print("XAICode upstream delta audit")
     print(f"base:     {base_commit} ({len(base_tree)} files)")
     print(f"target:   {target_commit} ({len(target_tree)} files)")
+    print(
+        "source:   "
+        f"crate={metadata['crate_version']} SOURCE_REV={metadata['source_rev']} "
+        f"commits={metadata['commit_count']}"
+    )
+    print(f"time:     {metadata['commit_time']}")
     print(f"xaicode:  {xaicode_commit} ({len(xaicode_tree)} files)")
     print(f"overlay:  {counts['xaicode_overlay']} changed paths")
     print(f"upstream: {counts['upstream_delta']} changed paths")
@@ -231,6 +273,7 @@ def check_contract(args: argparse.Namespace) -> int:
         "npm_published_at",
         "npm_git_head",
         "npm_source_mapping",
+        "record",
     )
     expect(
         isinstance(latest_observed, dict)
@@ -305,6 +348,74 @@ def check_contract(args: argparse.Namespace) -> int:
         migration.get("status", "") in migration_plan,
         "migration plan status differs from UPSTREAM.toml",
     )
+
+    lts_runbook = (repo / "docs/lts/upstream-maintenance.md").read_text(encoding="utf-8")
+    observation_record = latest_observed.get("record", "")
+    observation_parts = Path(observation_record).parts
+    observation_path_is_safe = (
+        len(observation_parts) >= 3
+        and observation_parts[:2] == ("docs", "lts")
+        and ".." not in observation_parts
+        and not Path(observation_record).is_absolute()
+    )
+    expect(
+        observation_path_is_safe,
+        "latest_observed.record must be a repository-relative docs/lts path",
+    )
+    current_observation = ""
+    if observation_path_is_safe:
+        observation_path = repo / observation_record
+        expect(observation_path.is_file(), "latest_observed.record does not exist")
+        if observation_path.is_file():
+            current_observation = observation_path.read_text(encoding="utf-8")
+    for marker in (
+        "protected",
+        "exact-head",
+        "GitHub Actions",
+        "contents: read",
+        "direct",
+        "adapt",
+        "preserve",
+        "reject",
+        "defer",
+        "retire",
+    ):
+        expect(marker in lts_runbook, f"LTS runbook is missing required marker: {marker}")
+    for field in ("git_commit", "source_rev", "crate_version", "npm_version", "npm_git_head"):
+        value = latest_observed.get(field, "")
+        expect(
+            value in current_observation,
+            f"current upstream observation does not record latest_observed.{field}",
+        )
+
+    observation_workflow = (
+        repo / ".github/workflows/upstream-observation.yml"
+    ).read_text(encoding="utf-8")
+    for marker in (
+        "schedule:",
+        "workflow_dispatch:",
+        "contents: read",
+        "audit-upstream",
+        "--format json",
+        "actions/upload-artifact@v7",
+    ):
+        expect(
+            marker in observation_workflow,
+            f"upstream observation workflow is missing required marker: {marker}",
+        )
+    for forbidden_marker in (
+        "contents: write",
+        "pull_request_target",
+        "git push",
+        "gh pr create",
+        "cargo check",
+        "cargo test",
+        "cargo build",
+    ):
+        expect(
+            forbidden_marker not in observation_workflow,
+            f"upstream observation workflow must stay read-only: {forbidden_marker}",
+        )
 
     version_toml = read_toml(repo / "crates/codegen/xai-grok-version/Cargo.toml")
     expect(

@@ -1,7 +1,8 @@
 # `.github` navigation card
 
-This directory owns CI/release workflows. Read root `AGENTS.md` and this card before changing
-commands, matrices, artifacts, tags or releases.
+This directory owns CI/release workflows and the read-only upstream observation workflow. Read
+root `AGENTS.md` and this card before changing commands, matrices, artifacts, schedules, tags or
+releases.
 
 ## Workflow contracts
 
@@ -11,8 +12,14 @@ commands, matrices, artifacts, tags or releases.
 - Format: `cargo fmt --check --all`
 - Tests: `cargo test -p xaicode --all-targets`
 - Maintenance contract: `python3 scripts/xaicode_maintenance.py check-contract`
+- Upstream observation: `python3 scripts/xaicode_maintenance.py audit-upstream --format json`
 
 Keep commands consistent with root. Add a full-workspace build only for a stated contract.
+
+`upstream-observation.yml` may fetch public `grok-build` Git objects and npm metadata, but it must
+remain read-only: `contents: read`, no upstream code execution, no auto-commit, no PR creation, no
+tag, and no product-source mutation. Scheduled observations report drift; they never select or
+integrate a migration target automatically.
 
 ## Toolchain and protoc
 

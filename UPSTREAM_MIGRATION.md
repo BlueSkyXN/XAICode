@@ -1,10 +1,9 @@
 # Upstream incremental migration: `afbc0fb` → `8a14c91`
 
-Status: **locally validated candidate** — the exact direct-child upstream delta and subsequent
-consumer-first source cleanup are assembled in the isolated
-`codex/source-clean-recovered` worktree. Local validation is recorded below. GitHub Actions on
-the exact candidate head, push, tag, Release, installation, and deployment remain separate
-delivery stages.
+Status: **complete** — the exact direct-child upstream delta and subsequent consumer-first source
+cleanup were merged through PR #2. The integrated tree is `main@7dec356645be0b61c34d074c9fbaa4be246e5153`,
+tagged and released as `v0.2.0`. Exact-head GitHub Actions evidence is recorded below;
+installation, deployment, and live-provider acceptance remain separate delivery stages.
 
 This document is the executable companion to [`UPSTREAM.toml`](UPSTREAM.toml),
 [`CLEAN_BUILD.md`](CLEAN_BUILD.md), and [`AGENTS.md`](AGENTS.md).
@@ -32,16 +31,17 @@ map exactly to the public source commit.
 
 ### Later upstream observation
 
-A read-only check on `2026-08-11T23:41:40Z` found public upstream `main` at
-`be713136d2a69080743a3f6b3c72077057e5948f`, three commits ahead of this migration target. That
-commit records `SOURCE_REV` `5d08d7e4123092567ccd584cd9f99afa2972065c` and crate `1.0.1`.
-The npm stable `latest` tag remains `1.0.0`; npm `alpha` is `1.0.2`, and neither distribution
-head maps exactly to the observed public commit.
+A read-only check on `2026-08-23T07:14:19Z` found public upstream `main` at
+`19d42e35c07a9c9244f03f6df0c4c353f970d4f9`, 11 commits ahead of this integrated target. That
+commit records `SOURCE_REV` `7d67deacbeb1c1093fdb4f9bcbfab2630e18a6aa` and crate `1.0.6`.
+The npm stable `latest` tag is `1.0.5` and npm `alpha` is `1.0.8`; their `gitHead` values do not
+map exactly to the observed public commit.
 
-Those three commits are not part of this candidate. Importing them would be a new incremental
-migration with a fresh three-tree review, especially because the delta touches worktrees,
-session/runtime containment, settings, pager behavior, updater/telemetry call sites, and other
-areas overlapped by the XAICode clean boundary.
+Those 11 commits are not part of the integrated XAICode source. They require a new incremental
+migration with a fresh three-tree review: 1,055 upstream paths changed, 301 overlap the XAICode
+clean overlay, and upstream `1.0.6` contains a breaking subagent contract change. The fixed
+observation and initial feature classification are in
+[`docs/lts/2026-08-23-upstream-observation.md`](docs/lts/2026-08-23-upstream-observation.md).
 
 ## Product boundary
 
@@ -190,12 +190,19 @@ shapes, and standards-based third-party MCP OAuth remain part of the preserved d
 
 ## Validation matrix
 
-Run in increasing scope:
+Local work is limited to read-only/static checks that do not compile Rust or populate `target/`:
 
 ```sh
 python3 scripts/xaicode_maintenance.py check-contract
+python3 scripts/xaicode_maintenance.py audit-upstream --target <exact-public-commit>
 git diff --check
 cargo fmt --check --all
+```
+
+Run compilation, lint, tests, binary smoke, provider-boundary tests, packaging, and release
+artifacts only in GitHub Actions on the exact candidate SHA:
+
+```sh
 cargo check -p xaicode
 cargo clippy -p xaicode --no-deps -- -D warnings
 cargo test -p xaicode --all-targets
@@ -206,7 +213,7 @@ Then smoke both binaries; run the loopback custom-provider/provider-header tests
 production managed-gateway and other vendor traps receive zero connections; and reopen/resume/
 search a session under a test-owned temporary `GROK_HOME`.
 
-## Candidate validation record: 2026-08-13
+## Baseline completion record: 2026-08-13
 
 | Gate | Result |
 |---|---|
@@ -229,13 +236,12 @@ search a session under a test-owned temporary `GROK_HOME`.
 | Temporary persistence | Test-owned `GROK_HOME` created, listed, FTS-searched, and resumed the same session after process exit; the live home was not opened |
 | Production auth/OTLP negative smoke | With a sentinel `auth.json` and OTLP switches/exporters pointed at a loopback collector, production `xaicode inspect --json` made zero collector connections; auth bytes, mode, and mtime were unchanged and no `auth.json.lock` was created |
 | Hosted-gateway proof | Production consumers and support crate are absent; the static contract pins their absence and preserved third-party MCP paths |
-| GitHub Actions | Not triggered because this branch has not been pushed |
+| GitHub Actions | PR head `67dbf6d2eeba8439c38138a6508871554833c07d` passed CI runs `31660999818` and `31660996964`; merged `main@7dec356645be0b61c34d074c9fbaa4be246e5153` passed run `31662999949`; tag `v0.2.0` passed Release run `31664646242` |
 
-The prior CI and release runs prove only `e2afb878`; they are the known-good baseline, not
-evidence for this candidate. Current checks use Homebrew Rust/Cargo 1.97.1 while the repository
-and CI are pinned to 1.94.0. The pinned-toolchain and remote CI result therefore remain an
-explicit delivery gap; local success does not prove GitHub CI, a release artifact, installation,
-or live-provider acceptance.
+The historical local checks used Homebrew Rust/Cargo 1.97.1; the authoritative compile/test and
+release evidence above used the repository-pinned Rust 1.94.0 in GitHub Actions. Those runs prove
+only the integrated `v0.2.0` baseline. They do not validate the later observed upstream commit,
+installation, deployment, or live-provider acceptance.
 
 ## Stop conditions
 
@@ -252,8 +258,8 @@ Stop rather than weakening the product boundary if:
 ## Rollback and delivery boundary
 
 - Rollback anchor: `main@e2afb878cf56cf3ec8235a0fa58e76960454fe3a`.
-- All changes remain in the isolated `codex/source-clean-recovered` worktree/branch.
-- No live data, credentials, remote branch, tag, Release, artifact, installation, or deployment
-  is changed by this migration.
-- The candidate may be committed locally. Push, PR, merge, tag, Release, and deployment require
-  separate authorization.
+- Integrated anchor: `main@7dec356645be0b61c34d074c9fbaa4be246e5153`, tag and Release `v0.2.0`.
+- The later `19d42e3` observation changes provenance records only; it does not import upstream
+  source, alter live data or credentials, create a product tag, install, or deploy anything.
+- Every future intake uses a new isolated branch/worktree and the LTS runbook. Merge, tag,
+  Release, installation, and deployment remain separately authorized and independently verified.

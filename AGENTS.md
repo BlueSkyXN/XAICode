@@ -25,11 +25,11 @@ paths unreachable.
   tag, `--version`, provenance, and artifact naming aligned when publishing.
 - Keep upstream distribution, public source and XAICode product versions separate. The latest
   read-only public-source observation is commit
-  `be713136d2a69080743a3f6b3c72077057e5948f`, crate `1.0.1`, `SOURCE_REV`
-  `5d08d7e4123092567ccd584cd9f99afa2972065c`, three commits ahead of the integrated baseline.
-  npm's stable `latest` tag still points to `1.0.0` with a different `gitHead`; its `alpha` tag
-  points to `1.0.2`, also without an exact public-commit mapping. Anchor syncs to an exact public
-  commit, never an npm label alone.
+  `19d42e35c07a9c9244f03f6df0c4c353f970d4f9`, crate `1.0.6`, `SOURCE_REV`
+  `7d67deacbeb1c1093fdb4f9bcbfab2630e18a6aa`, 11 commits ahead of the integrated baseline.
+  npm's stable `latest` tag points to `1.0.5` with a different `gitHead`; its `alpha` tag points
+  to `1.0.8`, also without an exact public-commit mapping. Anchor syncs to an exact public commit,
+  never an npm label alone.
 - On completed migration, update `README.md`, `CLEAN_BUILD.md`, `SOURCE_REV`, Cargo versions
   and `UPSTREAM.toml` together. Retain both public upstream commit and monorepo `SOURCE_REV`.
 
@@ -48,6 +48,7 @@ paths unreachable.
 | `crates/codegen/xai-grok-mcp/` | User-configured MCP transports and third-party OAuth | Yes | Changing MCP authentication, credentials, server discovery, or browser consent |
 | `crates/codegen/xai-grok-telemetry/` | Local diagnostics and disabled upstream telemetry implementations | Yes | Changing logs, metrics, tracing, exporters, Sentry, or telemetry startup/shutdown |
 | `crates/common/` | Shared protocol/runtime leaf crates | No | Changing shared wire or runtime contracts; validate all importers affected |
+| `docs/lts/` | LTS upstream observation, intake policy, decision records and rollback gates | No | Changing observation cadence, intake classification, protected seams, validation or rollback policy |
 | `prod/mc/` | Shared proxy and session wire types retained for compatibility | No | Changing serialized types or compatibility contracts |
 | `scripts/` | Standard-library maintenance and audit CLI | No | Changing provenance, contract checks, output schema, or exit behavior |
 | `third_party/` | Vendored third-party source and license material | No | Treat as read-only unless an explicit dependency/vendor update requires it |
@@ -276,6 +277,8 @@ installation and live custom-provider acceptance are separate evidence stages.
   hosted gateway catalog/tool-call helpers.
 - `UPSTREAM.toml` separates the integrated baseline from the latest observed candidate; update
   the latter only after a fresh read-only upstream check.
+- `docs/lts/upstream-maintenance.md` is the stable LTS intake runbook; each observation must pin
+  exact public source and distribution coordinates without automatically changing product source.
 - `UPSTREAM_MIGRATION.md` is the current executable migration plan; keep its status, fixed refs,
   phases, gates, stop conditions, and open decisions truthful as work advances.
 - Local unified logs are not hosted forwarding; MCP OAuth is not xAI account login.
