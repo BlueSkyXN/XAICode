@@ -43,6 +43,43 @@ clean overlay, and the range through upstream `1.0.8` contains a breaking subage
 change. The fixed observation and initial feature classification are in
 [`docs/lts/2026-08-23-upstream-observation.md`](docs/lts/2026-08-23-upstream-observation.md).
 
+### 2026-08-28 observation refresh
+
+A read-only check on `2026-08-28T12:00:00Z` found public upstream `main` at
+`9684fa3cdbf2995e30ea8b9b637f1db008f144fc`, 16 commits ahead of the integrated target
+(4 new `Synced from monorepo` commits since the `07b2f714` observation). Crate version
+advanced from `1.0.8` to `1.0.10`; `SOURCE_REV` is
+`70ec060ec3d28e77b9c4593be43c2ab0128bcd21`. npm `latest` remains `1.0.5`.
+
+The 4 new commits are bulk syncs from the internal monorepo. The largest single commit
+(`9684fa3`, 442 files) contains a mix of local-relevant and hosted-only changes:
+
+**Security items for next migration slice** (not integrated now):
+- `sandbox: block io_uring child-network bypass` — sandbox escape vector
+- `security: stop installer from sending deployment key as Bearer to attacker-settable URL`
+- `sandbox: fix Path import on Darwin enforce builds`
+
+**Build compatibility** (may be needed when the next slice compiles):
+- `unify websocket crates on 0.28` — duplicate stack elimination
+- `derive_more` adds `as_ref` feature
+- `xai-grok-home` renamed to `xai-dirs` (already absent from XAICode tree)
+
+**New crates** (defer; require independent evaluation):
+- `xai-grok-dashboard-store`, `xai-grok-shell-terminal`
+
+**Behavioral changes deferred to a future feature slice**:
+- `hooks: UserPromptSubmit blocks`, `auto-mode: auto-allow mkdir/touch`,
+  `shell: headless default always-allow`, `auth: AuthBackend trait`,
+  `shell: gate mcpServers on folder trust`, MCP `elicitation`/`owned_clients`
+
+**Rejected** (hosted control plane, no change from previous classification):
+- `chat/gateway identity`, `computer-hub bot relay`, `dashboard workspace`,
+  `workspace OIDC`, `tracing turn-end uploads`, `TUI grok-4.6 model slugs`,
+  BotRelay protocol generated code (Swift/Kotlin)
+
+This refresh updates provenance records only; it does not import upstream source or alter
+the integrated tree.
+
 ## Product boundary
 
 ### Preserved
@@ -259,7 +296,8 @@ Stop rather than weakening the product boundary if:
 
 - Rollback anchor: `main@e2afb878cf56cf3ec8235a0fa58e76960454fe3a`.
 - Integrated anchor: `main@7dec356645be0b61c34d074c9fbaa4be246e5153`, tag and Release `v0.2.0`.
-- The later `07b2f714` observation changes provenance records only; it does not import upstream
-  source, alter live data or credentials, create a product tag, install, or deploy anything.
+- The later `07b2f714` and `9684fa3` observations change provenance records only; they do not
+  import upstream source, alter live data or credentials, create a product tag, install, or
+  deploy anything.
 - Every future intake uses a new isolated branch/worktree and the LTS runbook. Merge, tag,
   Release, installation, and deployment remain separately authorized and independently verified.
