@@ -7,16 +7,16 @@ source_rev = "27b3c66635e2c0bf213429a36ab916f25d59df20"
 crate_version = "1.0.0"
 
 [latest_observed]
-checked_at = "2026-08-23T13:57:01Z"
-git_commit = "07b2f7144fd5c5c9d3dd1966937a87852d2dbdb8"
-commit_time = "2026-08-23T10:48:57Z"
-source_rev = "956313d459bee15ae8f17bf73e0633605e18dddd"
-crate_version = "1.0.8"
+checked_at = "2026-08-28T12:00:00Z"
+git_commit = "9684fa3cdbf2995e30ea8b9b637f1db008f144fc"
+commit_time = "2026-08-27T13:30:20Z"
+source_rev = "70ec060ec3d28e77b9c4593be43c2ab0128bcd21"
+crate_version = "1.0.10"
 npm_version = "1.0.5"
 npm_published_at = "2026-08-16T00:25:35.078Z"
 npm_git_head = "5115b46bc909ae5c7f5fc064455197440e796b6b"
 npm_source_mapping = "unmapped"
-record = "docs/lts/2026-08-23-upstream-observation.md"
+record = "docs/lts/2026-08-28-upstream-observation.md"
 
 [migration]
 status = "complete"
