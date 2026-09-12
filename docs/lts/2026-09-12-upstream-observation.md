@@ -73,6 +73,11 @@ owner 为项目维护者，触发条件为对应表格中的兼容决策、独�
 的额外参数，产生 18 个 E0061/E0277 错误。只移除这六个旧测试参数，不改生产接口；
 CI 同时执行 `session::tool_config::tests::`，覆盖 MCP 合并、能力过滤和临时状态恢复。
 
+随后两平台均有 554 项权限测试通过，6 项旧测试因仍期待 hosted permission transport
+返回批准而失败。本地授权/取消、protected edit、request cwd 和 MCP scope 持久化测试
+改走既有 ACP gateway；hosted 专用用例改为验证在 transport 回调前拒绝。没有启用旧
+bridge、增加 `cfg(test)` 绕过或跳过测试，生产实现保持不变。
+
 候选必须通过 exact-head CI 与非 tag 的 Release workflow（双 binary smoke、provider
 boundary、打包），然后以 merge commit 合入；PR 保存 run URLs 和验证 SHA。合并后复查
 main tree 与候选 tree 相同、main CI 成功、无未提交改动或有价值的分支残留。

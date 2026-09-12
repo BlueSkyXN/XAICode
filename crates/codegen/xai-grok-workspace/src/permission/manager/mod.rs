@@ -2685,35 +2685,79 @@ mod tests {
         })
     }
 
+    struct LocalPermissionClient {
+        option_id: Option<&'static str>,
+        meta: Option<acp::Meta>,
+        prompts: std::rc::Rc<std::cell::RefCell<Vec<acp::RequestPermissionRequest>>>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl acp::Client for LocalPermissionClient {
+        async fn request_permission(
+            &self,
+            request: acp::RequestPermissionRequest,
+        ) -> acp::Result<acp::RequestPermissionResponse> {
+            let outcome = match self.option_id {
+                Some(id) => {
+                    assert!(
+                        request
+                            .options
+                            .iter()
+                            .any(|option| option.option_id.0.as_ref() == id)
+                    );
+                    acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                        acp::PermissionOptionId::new(id),
+                    ))
+                }
+                None => acp::RequestPermissionOutcome::Cancelled,
+            };
+            self.prompts.borrow_mut().push(request);
+            let mut response = acp::RequestPermissionResponse::new(outcome);
+            response.meta = self.meta.clone();
+            Ok(response)
+        }
+
+        async fn session_notification(&self, _: acp::SessionNotification) -> acp::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 本地权限行为通过真实 ACP gateway 测试，不借已禁用的 hosted bridge。
+    fn test_manager_with_local_reply(
+        cwd: &AbsPathBuf,
+        option_id: Option<&'static str>,
+        meta: Option<acp::Meta>,
+    ) -> (
+        PermissionHandle,
+        std::rc::Rc<std::cell::RefCell<Vec<acp::RequestPermissionRequest>>>,
+    ) {
+        let prompts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let client = LocalPermissionClient {
+            option_id,
+            meta,
+            prompts: prompts.clone(),
+        };
+        let (manager, _events) =
+            manager_with_recording_client_remember(cwd, None, client, ClientType::GrokPager, true);
+        (manager, prompts)
+    }
+
     #[tokio::test]
-    async fn hub_permission_approve_allows_and_emits_payload() {
+    async fn hosted_permission_bridge_fails_closed_before_transport() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let transport = fake_hub(serde_json::json!({ "outcome": "approve" }));
-                let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
-                let d = mgr
-                    .request(
-                        AccessKind::Edit("src/main.rs".into()),
-                        tool_call(),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-                assert_eq!(d, Decision::Allow);
-                let seen = transport.seen.lock().unwrap();
-                assert_eq!(seen.len(), 1, "exactly one permission hook emitted");
-                assert_eq!(seen[0]["tool_call_id"], "tc");
-                assert_eq!(seen[0]["tool_name"], "search_replace");
-                assert_eq!(seen[0]["description"], "Edit src/main.rs");
-                assert_eq!(seen[0]["scope"], "write");
-                assert_eq!(
-                    seen[0]["edit_file_paths"],
-                    serde_json::json!(["src/main.rs"])
-                );
+                for outcome in ["approve", "always_approve", "reject", "cancelled"] {
+                    let transport = fake_hub(serde_json::json!({ "outcome": outcome }));
+                    let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
+                    let decision = mgr.request(
+                        AccessKind::Edit("src/main.rs".into()), tool_call(), None, None, None,
+                    ).await;
+                    assert!(matches!(decision, Decision::Reject(ref reason) if reason.contains("hosted permission transport is disabled")));
+                    assert!(transport.seen.lock().unwrap().is_empty(), "{outcome}: transport must not be called");
+                }
             })
             .await;
     }
@@ -2725,8 +2769,8 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let transport = fake_hub(serde_json::json!({ "outcome": "always_approve" }));
-                let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
+                let (mgr, prompts) =
+                    test_manager_with_local_reply(&cwd, Some("allow-edits-session"), None);
                 for path in ["src/first.rs", "src/second.rs", "~/.zshrc"] {
                     assert_eq!(
                         mgr.request(AccessKind::Edit(path.into()), tool_call(), None, None, None)
@@ -2734,7 +2778,7 @@ mod tests {
                         Decision::Allow
                     );
                 }
-                assert_eq!(transport.seen.lock().unwrap().len(), 2);
+                assert_eq!(prompts.borrow().len(), 2);
             })
             .await;
     }
@@ -2752,8 +2796,8 @@ mod tests {
                 let display = tempfile::tempdir().unwrap();
                 symlink("/etc", child.path().join("link")).unwrap();
                 let parent_cwd = AbsPathBuf::new(parent.path().to_path_buf()).unwrap();
-                let transport = fake_hub(serde_json::json!({ "outcome": "approve" }));
-                let (mgr, _events) = test_manager_with_hub(&parent_cwd, transport.clone());
+                let (mgr, prompts) =
+                    test_manager_with_local_reply(&parent_cwd, Some("allow-once"), None);
                 mgr.set_auto_mode(true);
                 let context = RequestPathContext {
                     real_cwd: child.path().to_path_buf(),
@@ -2778,7 +2822,7 @@ mod tests {
                     );
                 }
                 assert_eq!(
-                    transport.seen.lock().unwrap().len(),
+                    prompts.borrow().len(),
                     1,
                     "child protected target prompts; ordinary displayed child path stays auto"
                 );
@@ -2888,16 +2932,13 @@ mod tests {
 
     /// `cancelled` reply (turn-end drain) → abort, distinct from a user reject.
     #[tokio::test]
-    async fn hub_permission_cancelled_aborts_distinctly() {
+    async fn local_permission_cancelled_aborts_distinctly() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, _e) = test_manager_with_hub(
-                    &cwd,
-                    fake_hub(serde_json::json!({ "outcome": "cancelled" })),
-                );
+                let (mgr, _prompts) = test_manager_with_local_reply(&cwd, None, None);
                 let d = mgr
                     .request(
                         AccessKind::Edit("a.rs".into()),
@@ -2913,17 +2954,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hub_permission_always_approve_persists_scope() {
+    async fn local_permission_always_approve_persists_scope() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let transport = fake_hub(serde_json::json!({
-                    "outcome": "always_approve",
-                    "scope": { "kind": "server_prefix", "value": "linear" },
-                }));
-                let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
+                let (mgr, prompts) = test_manager_with_local_reply(
+                    &cwd,
+                    Some("allow-always-mcp"),
+                    serde_json::json!({ "kind": "server", "server": "linear" })
+                        .as_object()
+                        .cloned(),
+                );
                 let first = mgr
                     .request(
                         AccessKind::MCPTool {
@@ -2951,9 +2994,9 @@ mod tests {
                     .await;
                 assert_eq!(second, Decision::Allow);
                 assert_eq!(
-                    transport.seen.lock().unwrap().len(),
+                    prompts.borrow().len(),
                     1,
-                    "always_approve must persist so the second call needs no hook"
+                    "always-approve must persist so the second call needs no ACP prompt"
                 );
             })
             .await;
@@ -2967,11 +3010,13 @@ mod tests {
                 for (name, forged_server) in [("a__b__c", "a"), ("foo___bar", "foo")] {
                     let tmp = tempfile::tempdir().unwrap();
                     let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                    let transport = fake_hub(serde_json::json!({
-                        "outcome": "always_approve",
-                        "scope": { "kind": "server_prefix", "value": forged_server },
-                    }));
-                    let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
+                    let (mgr, _prompts) = test_manager_with_local_reply(
+                        &cwd,
+                        Some("allow-always-mcp"),
+                        serde_json::json!({ "kind": "server", "server": forged_server })
+                            .as_object()
+                            .cloned(),
+                    );
                     let decision = mgr
                         .request(
                             AccessKind::MCPTool {
@@ -2994,8 +3039,8 @@ mod tests {
                         Some(Decision::Allow)
                     ));
 
-                    let replay_transport = fake_hub(serde_json::json!({ "outcome": "reject" }));
-                    let (reloaded, _e) = test_manager_with_hub(&cwd, replay_transport.clone());
+                    let (reloaded, replay_prompts) =
+                        test_manager_with_local_reply(&cwd, Some("reject-once"), None);
                     assert_eq!(
                         reloaded
                             .request(
@@ -3011,7 +3056,7 @@ mod tests {
                             .await,
                         Decision::Allow
                     );
-                    assert!(replay_transport.seen.lock().unwrap().is_empty());
+                    assert!(replay_prompts.borrow().is_empty());
                 }
             })
             .await;
