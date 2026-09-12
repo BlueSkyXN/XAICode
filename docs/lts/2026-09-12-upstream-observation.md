@@ -31,7 +31,7 @@ Status: **observed and classified; focused downstream fixes; full upstream sync 
 |---|---|---|
 | `rg --hostname-bin` | `adapt`：本次修复 | 本地仅拦 `--pre`，遗漏同样可运行外部程序的 hostname helper；共用参数检测，覆盖 safe list、Auto heuristic 和 broad-grant finding，保留 exact grant |
 | Git routine prefix | `adapt`：本次修复 | `checkout`、`switch`、`stash` 整类前缀不能区分正常开发与丢弃工作；改为参数形态判断，保留 shared read-only/exec-risk helpers |
-| 上游对 `checkout` 无扩展名参数、`-B/-C` 的放行 | `preserve`：不照搬 | 无扩展名文件与分支有歧义；`-B/-C` 会重置已有分支。本地要求进入现有权限判断，不猜文件扩展名，不直接禁止用户明确授权 |
+| 上游对 `checkout` 无扩展名参数、`-B/-C` 的放行 | `adapt`：不照搬 | 无扩展名文件与分支有歧义；`-B/-C` 会重置已有分支。本地要求进入现有权限判断，不猜文件扩展名，不直接禁止用户明确授权 |
 | `/theme` 别名 picker 匹配 | `direct` 候选、暂缓 | 通用 UI 修复；普通功能未满 7 天观察期。后续单独适配测试，不引入 terminal-theme remote rollout gate |
 | mode-000 sandbox spoof 误报 | `defer` | patch 修改 `read_deny_verify` 的 O_PATH/statx 校验；该模块在当前基线不存在。需先审查前置 sandbox slice，不能复制单文件假装适用 |
 | 图片错误后的历史 strip | `defer` | diff 从重试成功才改历史变为 Completed/Failed 都可持久化移除；需决定历史保留、备份、rewind/drain-barrier 语义并验证临时持久化 |
@@ -68,6 +68,10 @@ owner 为项目维护者，触发条件为对应表格中的兼容决策、独�
 的 `audit-upstream`；不执行本地 Rust 编译。CI 在原 Linux/macOS composition tests 后增加
 `cargo test -p xai-grok-workspace --lib permission::`，实际运行权限回归而不只编译产品入口。
 新增/扩展测试覆盖 helper、复合命令、宽泛 policy/session grant 和 exact grant 的差异。
+
+首次编译 workspace 测试库发现 `session/tool_config.rs` 的六处历史测试调用仍带有已删除
+的额外参数，产生 18 个 E0061/E0277 错误。只移除这六个旧测试参数，不改生产接口；
+CI 同时执行 `session::tool_config::tests::`，覆盖 MCP 合并、能力过滤和临时状态恢复。
 
 候选必须通过 exact-head CI 与非 tag 的 Release workflow（双 binary smoke、provider
 boundary、打包），然后以 merge commit 合入；PR 保存 run URLs 和验证 SHA。合并后复查
