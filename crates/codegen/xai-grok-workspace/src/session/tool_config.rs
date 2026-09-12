@@ -594,7 +594,6 @@ mod tests {
             baseline,
             CapabilityMode::ReadWrite,
             &[],
-            &[],
             cwd,
             empty_env(),
             "main",
@@ -631,7 +630,6 @@ mod tests {
             baseline,
             CapabilityMode::ReadWrite,
             &snapshot,
-            &[],
             PathBuf::from("/tmp"),
             empty_env(),
             "main",
@@ -711,7 +709,6 @@ mod tests {
         let (eff, ts, _backend) = resolve_session_toolset(
             baseline,
             CapabilityMode::ReadOnly,
-            &[],
             &[],
             PathBuf::from("/tmp"),
             empty_env(),
@@ -978,7 +975,6 @@ mod tests {
             test_support::baseline_config(),
             CapabilityMode::ReadWrite,
             &[],
-            &[],
             cwd.clone(),
             empty_env(),
             "sess-A",
@@ -999,7 +995,6 @@ mod tests {
         let (_eff, ts_b, _backend_b) = resolve_session_toolset(
             test_support::baseline_config(),
             CapabilityMode::ReadWrite,
-            &[],
             &[],
             cwd.clone(),
             empty_env(),
@@ -1024,7 +1019,6 @@ mod tests {
         let (_eff, ts_c, _backend_c) = resolve_session_toolset(
             test_support::baseline_config(),
             CapabilityMode::ReadWrite,
-            &[],
             &[],
             cwd,
             empty_env(),

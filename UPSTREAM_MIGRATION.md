@@ -82,6 +82,15 @@ the integrated tree.
 
 ## Product boundary
 
+### 2026-09-12 focused permission maintenance
+
+The [latest observation](docs/lts/2026-09-12-upstream-observation.md) fixes the public
+target at `37949780` / crate `1.0.24`. Two applicable permission defects are addressed
+as a downstream maintenance slice, not a bulk source migration. The integrated
+`8a14c91` baseline, `SOURCE_REV`, product version and previous migration status stay
+unchanged. The remaining public commits still require real-ancestry staged intake;
+this focused fix does not mark either bulk sync as merged.
+
 ### Preserved
 
 - TUI/dashboard, ACP stdio/headless/local server, terminal/files/edit/git/LSP/search,

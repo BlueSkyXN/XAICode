@@ -17,7 +17,8 @@ use crate::permission::bash_command_splitting::{
 use crate::permission::exec_risk::{
     AmbientScanPlan, SAFE_GIT_SUBCOMMANDS, ambient_exec_risk_from_plan,
     ambient_scan_plan_from_segments, git_words_are_read_only_query,
-    git_words_have_unsafe_query_option, script_may_invoke_git, segment_exec_facts,
+    git_words_have_unsafe_query_option, rg_has_unsafe_flag, script_may_invoke_git,
+    segment_exec_facts,
 };
 use crate::permission::gate_preflight::GatePreflight;
 use crate::permission::policy::{CompiledPolicy, ShellWord};
@@ -130,24 +131,6 @@ fn mcp_pre_decision(
     None
 }
 
-/// True when `words` is an `rg` invocation that enables a preprocessor.
-///
-/// `rg --pre COMMAND` (or `--pre=COMMAND`) runs `COMMAND <file>` for every
-/// searched file, so it can execute arbitrary programs. It must not ride the
-/// built-in safe-command auto-allow (unlike a pipeline, `--pre` stays one
-/// bash segment whose primary is still `rg`).
-///
-/// Deliberately does **not** match `--pre-glob`, which only filters when a
-/// preprocessor runs and does not itself spawn processes.
-fn rg_has_pre_flag(words: &[String]) -> bool {
-    if words.first().map(String::as_str) != Some("rg") {
-        return false;
-    }
-    words
-        .iter()
-        .any(|w| w == "--pre" || w.starts_with("--pre="))
-}
-
 /// True when `words` is a `kubectl` invocation that selects a caller-controlled
 /// kubeconfig, endpoint, auth, or identity.
 ///
@@ -258,7 +241,7 @@ fn is_safe_command_words(words: &[String]) -> bool {
     if words.is_empty() {
         return false;
     }
-    if rg_has_pre_flag(words) {
+    if rg_has_unsafe_flag(words) {
         return false;
     }
     if kubectl_has_unsafe_flag(words) {
@@ -320,7 +303,7 @@ fn is_safe_command_words_str(cmd: &str) -> bool {
     // to arbitrary files, enabling pipelines like `cat data | tee /target` to
     // bypass edit permissions.
     //
-    // `rg --pre` is excluded at the words level via [`rg_has_pre_flag`] — the
+    // `rg` executable options are excluded via [`rg_has_unsafe_flag`] — the
     // string form here cannot see flag structure reliably after join.
 }
 
@@ -360,7 +343,7 @@ fn is_always_safe_command_words(words: &[String]) -> bool {
     if words.is_empty() {
         return false;
     }
-    if rg_has_pre_flag(words) {
+    if rg_has_unsafe_flag(words) {
         return false;
     }
     if kubectl_has_unsafe_flag(words) {
@@ -636,7 +619,7 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         // segment grant still auto-allows below. Do NOT insert DangerousCommand —
         // that would also block exact grants.
         if (kubectl_has_unsafe_flag(words)
-            || rg_has_pre_flag(words)
+            || rg_has_unsafe_flag(words)
             || ps_dumps_environment(words)
             || git_words_have_unsafe_query_option(words))
             && !state.allowed_bash_commands.contains(&s)
@@ -2702,35 +2685,79 @@ mod tests {
         })
     }
 
+    struct LocalPermissionClient {
+        option_id: Option<&'static str>,
+        meta: Option<acp::Meta>,
+        prompts: std::rc::Rc<std::cell::RefCell<Vec<acp::RequestPermissionRequest>>>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl acp::Client for LocalPermissionClient {
+        async fn request_permission(
+            &self,
+            request: acp::RequestPermissionRequest,
+        ) -> acp::Result<acp::RequestPermissionResponse> {
+            let outcome = match self.option_id {
+                Some(id) => {
+                    assert!(
+                        request
+                            .options
+                            .iter()
+                            .any(|option| option.option_id.0.as_ref() == id)
+                    );
+                    acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                        acp::PermissionOptionId::new(id),
+                    ))
+                }
+                None => acp::RequestPermissionOutcome::Cancelled,
+            };
+            self.prompts.borrow_mut().push(request);
+            let mut response = acp::RequestPermissionResponse::new(outcome);
+            response.meta = self.meta.clone();
+            Ok(response)
+        }
+
+        async fn session_notification(&self, _: acp::SessionNotification) -> acp::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 本地权限行为通过真实 ACP gateway 测试，不借已禁用的 hosted bridge。
+    fn test_manager_with_local_reply(
+        cwd: &AbsPathBuf,
+        option_id: Option<&'static str>,
+        meta: Option<acp::Meta>,
+    ) -> (
+        PermissionHandle,
+        std::rc::Rc<std::cell::RefCell<Vec<acp::RequestPermissionRequest>>>,
+    ) {
+        let prompts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let client = LocalPermissionClient {
+            option_id,
+            meta,
+            prompts: prompts.clone(),
+        };
+        let (manager, _events) =
+            manager_with_recording_client_remember(cwd, None, client, ClientType::GrokPager, true);
+        (manager, prompts)
+    }
+
     #[tokio::test]
-    async fn hub_permission_approve_allows_and_emits_payload() {
+    async fn hosted_permission_bridge_fails_closed_before_transport() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let transport = fake_hub(serde_json::json!({ "outcome": "approve" }));
-                let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
-                let d = mgr
-                    .request(
-                        AccessKind::Edit("src/main.rs".into()),
-                        tool_call(),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-                assert_eq!(d, Decision::Allow);
-                let seen = transport.seen.lock().unwrap();
-                assert_eq!(seen.len(), 1, "exactly one permission hook emitted");
-                assert_eq!(seen[0]["tool_call_id"], "tc");
-                assert_eq!(seen[0]["tool_name"], "search_replace");
-                assert_eq!(seen[0]["description"], "Edit src/main.rs");
-                assert_eq!(seen[0]["scope"], "write");
-                assert_eq!(
-                    seen[0]["edit_file_paths"],
-                    serde_json::json!(["src/main.rs"])
-                );
+                for outcome in ["approve", "always_approve", "reject", "cancelled"] {
+                    let transport = fake_hub(serde_json::json!({ "outcome": outcome }));
+                    let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
+                    let decision = mgr.request(
+                        AccessKind::Edit("src/main.rs".into()), tool_call(), None, None, None,
+                    ).await;
+                    assert!(matches!(decision, Decision::Reject(ref reason) if reason.contains("hosted permission transport is disabled")));
+                    assert!(transport.seen.lock().unwrap().is_empty(), "{outcome}: transport must not be called");
+                }
             })
             .await;
     }
@@ -2742,8 +2769,8 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let transport = fake_hub(serde_json::json!({ "outcome": "always_approve" }));
-                let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
+                let (mgr, prompts) =
+                    test_manager_with_local_reply(&cwd, Some("allow-edits-session"), None);
                 for path in ["src/first.rs", "src/second.rs", "~/.zshrc"] {
                     assert_eq!(
                         mgr.request(AccessKind::Edit(path.into()), tool_call(), None, None, None)
@@ -2751,7 +2778,7 @@ mod tests {
                         Decision::Allow
                     );
                 }
-                assert_eq!(transport.seen.lock().unwrap().len(), 2);
+                assert_eq!(prompts.borrow().len(), 2);
             })
             .await;
     }
@@ -2769,8 +2796,8 @@ mod tests {
                 let display = tempfile::tempdir().unwrap();
                 symlink("/etc", child.path().join("link")).unwrap();
                 let parent_cwd = AbsPathBuf::new(parent.path().to_path_buf()).unwrap();
-                let transport = fake_hub(serde_json::json!({ "outcome": "approve" }));
-                let (mgr, _events) = test_manager_with_hub(&parent_cwd, transport.clone());
+                let (mgr, prompts) =
+                    test_manager_with_local_reply(&parent_cwd, Some("allow-once"), None);
                 mgr.set_auto_mode(true);
                 let context = RequestPathContext {
                     real_cwd: child.path().to_path_buf(),
@@ -2795,7 +2822,7 @@ mod tests {
                     );
                 }
                 assert_eq!(
-                    transport.seen.lock().unwrap().len(),
+                    prompts.borrow().len(),
                     1,
                     "child protected target prompts; ordinary displayed child path stays auto"
                 );
@@ -2905,16 +2932,13 @@ mod tests {
 
     /// `cancelled` reply (turn-end drain) → abort, distinct from a user reject.
     #[tokio::test]
-    async fn hub_permission_cancelled_aborts_distinctly() {
+    async fn local_permission_cancelled_aborts_distinctly() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, _e) = test_manager_with_hub(
-                    &cwd,
-                    fake_hub(serde_json::json!({ "outcome": "cancelled" })),
-                );
+                let (mgr, _prompts) = test_manager_with_local_reply(&cwd, None, None);
                 let d = mgr
                     .request(
                         AccessKind::Edit("a.rs".into()),
@@ -2930,17 +2954,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hub_permission_always_approve_persists_scope() {
+    async fn local_permission_always_approve_persists_scope() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let transport = fake_hub(serde_json::json!({
-                    "outcome": "always_approve",
-                    "scope": { "kind": "server_prefix", "value": "linear" },
-                }));
-                let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
+                let (mgr, prompts) = test_manager_with_local_reply(
+                    &cwd,
+                    Some("allow-always-mcp"),
+                    serde_json::json!({ "kind": "server", "server": "linear" })
+                        .as_object()
+                        .cloned(),
+                );
                 let first = mgr
                     .request(
                         AccessKind::MCPTool {
@@ -2968,9 +2994,9 @@ mod tests {
                     .await;
                 assert_eq!(second, Decision::Allow);
                 assert_eq!(
-                    transport.seen.lock().unwrap().len(),
+                    prompts.borrow().len(),
                     1,
-                    "always_approve must persist so the second call needs no hook"
+                    "always-approve must persist so the second call needs no ACP prompt"
                 );
             })
             .await;
@@ -2984,11 +3010,13 @@ mod tests {
                 for (name, forged_server) in [("a__b__c", "a"), ("foo___bar", "foo")] {
                     let tmp = tempfile::tempdir().unwrap();
                     let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                    let transport = fake_hub(serde_json::json!({
-                        "outcome": "always_approve",
-                        "scope": { "kind": "server_prefix", "value": forged_server },
-                    }));
-                    let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
+                    let (mgr, _prompts) = test_manager_with_local_reply(
+                        &cwd,
+                        Some("allow-always-mcp"),
+                        serde_json::json!({ "kind": "server", "server": forged_server })
+                            .as_object()
+                            .cloned(),
+                    );
                     let decision = mgr
                         .request(
                             AccessKind::MCPTool {
@@ -3011,8 +3039,8 @@ mod tests {
                         Some(Decision::Allow)
                     ));
 
-                    let replay_transport = fake_hub(serde_json::json!({ "outcome": "reject" }));
-                    let (reloaded, _e) = test_manager_with_hub(&cwd, replay_transport.clone());
+                    let (reloaded, replay_prompts) =
+                        test_manager_with_local_reply(&cwd, Some("reject-once"), None);
                     assert_eq!(
                         reloaded
                             .request(
@@ -3028,7 +3056,7 @@ mod tests {
                             .await,
                         Decision::Allow
                     );
-                    assert!(replay_transport.seen.lock().unwrap().is_empty());
+                    assert!(replay_prompts.borrow().is_empty());
                 }
             })
             .await;
@@ -4950,6 +4978,10 @@ mod tests {
                     for cmd in [
                         "kubectl get pods --kubeconfig=/tmp/evil.yaml",
                         "rg --pre ./pre.sh TODO .",
+                        "rg --hostname-bin=./payload needle",
+                        "rg --hostname-bin ./payload needle",
+                        "timeout 5 rg --hostname-bin=./payload needle",
+                        "/usr/bin/rg --hostname-bin=./payload needle",
                         "ps auxe",
                         "git cat-file --textconv HEAD:x",
                     ] {
@@ -5002,6 +5034,7 @@ mod tests {
                         ("chmod -R 777 /etc", DangerousCommand),
                         ("kill -9 1", DangerousCommand),
                         ("git push --force origin main", DangerousCommand),
+                        ("rg --hostname-bin=./payload needle", SpecialExecSurface),
                         (
                             "kubectl get pods --kubeconfig=/tmp/evil.yaml",
                             SpecialExecSurface,
@@ -6614,6 +6647,8 @@ mod tests {
         // --pre runs COMMAND per file — must not auto-allow (exec bypass).
         assert!(!is_safe_command("rg --pre cat pattern ."));
         assert!(!is_safe_command("rg --pre=/bin/cat pattern ."));
+        assert!(!is_safe_command("rg --hostname-bin=./payload needle"));
+        assert!(!is_safe_command("rg --hostname-bin ./payload needle"));
         assert!(!is_safe_command("rg -n --pre ./wrapper pattern"));
         assert!(!is_safe_command(
             "rg --pre-glob '*.pdf' --pre pdftotext pattern"
@@ -6729,6 +6764,10 @@ mod tests {
         // `rg --pre` is not fully safe-listed, so do not narrow to bare `rg`.
         assert_eq!(
             default_always_allow_scope(&words("rg --pre cat pattern")),
+            2
+        );
+        assert_eq!(
+            default_always_allow_scope(&words("rg --hostname-bin=./payload needle")),
             2
         );
         assert_eq!(
@@ -7204,6 +7243,45 @@ mod tests {
         match evaluate_bash_segments(cmd, &exact_state) {
             SegmentEvaluation::AutoAllow { .. } => {}
             other => panic!("exact grant must auto-allow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_rg_exec_flags_preserve_exact_but_not_prefix_grants() {
+        for cmd in [
+            "rg --hostname-bin=./payload needle",
+            "rg --hostname-bin ./payload needle",
+            "rg --pre=./payload needle",
+            "/usr/bin/rg --hostname-bin=./payload needle",
+        ] {
+            let mut state = PermissionState::default();
+            state.allowed_bash_commands.insert("rg".into());
+            state.allowed_bash_globs.insert("*rg*".into());
+            let evaluation = evaluate_bash(cmd, &state, true);
+            assert!(
+                matches!(evaluation.segments, SegmentEvaluation::NeedsPrompts { .. }),
+                "{cmd}"
+            );
+            assert!(
+                evaluation
+                    .assessment
+                    .contains(ClassifierSecurityFinding::SpecialExecSurface),
+                "{cmd}"
+            );
+
+            state.allowed_bash_commands.insert(cmd.into());
+            let evaluation = evaluate_bash(cmd, &state, true);
+            assert!(
+                matches!(evaluation.segments, SegmentEvaluation::AutoAllow { .. }),
+                "{cmd}"
+            );
+            assert!(evaluation.exact_grant, "{cmd}");
+            assert!(
+                !evaluation
+                    .assessment
+                    .contains(ClassifierSecurityFinding::SpecialExecSurface),
+                "{cmd}"
+            );
         }
     }
 

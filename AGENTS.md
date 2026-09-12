@@ -26,9 +26,9 @@ paths unreachable.
   `--version`, provenance, and artifact naming aligned when publishing.
 - Keep upstream distribution, public source and XAICode product versions separate. The latest
   read-only public-source observation is commit
-  `9684fa3cdbf2995e30ea8b9b637f1db008f144fc`, crate `1.0.10`, `SOURCE_REV`
-  `70ec060ec3d28e77b9c4593be43c2ab0128bcd21`, 16 commits ahead of the integrated baseline.
-  npm's stable `latest` tag points to `1.0.5` with a different `gitHead`. Anchor syncs to an exact
+  `37949780c144e37df692e3d669051a21fec24f20`, crate `1.0.24`, `SOURCE_REV`
+  `c4ea71cfdbcdb21e32e41bc25a0043d7d4836714`, 20 commits ahead of the integrated baseline.
+  npm's stable `latest` tag points to `1.0.30` with a different `gitHead`. Anchor syncs to an exact
   public commit, never an npm label alone.
 - On completed migration, update `README.md`, `CLEAN_BUILD.md`, `SOURCE_REV`, Cargo versions
   and `UPSTREAM.toml` together. Retain both public upstream commit and monorepo `SOURCE_REV`.
