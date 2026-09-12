@@ -13,13 +13,16 @@ use super::bash_command_splitting::{
     PlainCommand, is_wrapper_command, strip_wrapper_command, try_parse_shell,
     try_parse_word_only_commands_sequence, unwrap_wrappers,
 };
-use super::exec_risk::{git_words_are_read_only_query, git_words_have_unsafe_query_option};
+use super::exec_risk::rg_has_unsafe_flag;
 use super::shell_access::{
     command_words_write_paths, command_write_paths_in_tree, is_safe_write_sink,
 };
 use super::types::AccessKind;
 
+mod routine_git;
 mod security_findings;
+
+use routine_git::git_words_are_routine;
 
 pub use security_findings::{BashSecurityAssessment, ClassifierSecurityFinding};
 
@@ -487,22 +490,9 @@ impl HeuristicPermissionClassifier {
 /// SAFE-subcommand allowlist in [`package_manager_subcommand_is_routine`].
 /// `cp`/`mv`/`mkdir`/`touch` are also ABSENT: they write/create arbitrary
 /// destinations the write model already Blocks. `cd`/`pushd`/`popd` only move
-/// the spawned shell's cwd; git entries are the local workflow plus read-only
-/// queries.
+/// the spawned shell's cwd. Git uses the argument-aware `routine_git` allowlist.
 const ROUTINE_PREFIXES: &[&str] = &[
     "cargo ",
-    // Read-only git queries are NOT listed here: they go through the shared
-    // `exec_risk::git_words_are_read_only_query` helper (single verb table +
-    // unsafe-option table) in `bash_command_is_routine`. Only the local
-    // write-workflow verbs stay prefix-matched.
-    "git add",
-    "git commit",
-    "git checkout",
-    "git switch",
-    "git stash",
-    "git pull",
-    "git fetch",
-    "git worktree list",
     "pytest",
     "python ",
     "python3 ",
@@ -679,19 +669,8 @@ fn bash_command_is_routine(words: &[String]) -> bool {
     if head == "find" {
         return find_is_read_only(inner);
     }
-    // Git: read-only queries decide via the shared helper (one verb table +
-    // one unsafe-option table with the manager safe lists — `--filters` /
-    // `--textconv` content drivers, `--output` write sink, `--ext-diff`,
-    // `grep -O` pager exec, with long-option abbreviations failing closed).
-    // The local write-workflow verbs (`git add`/`commit`/…) fall through to
-    // ROUTINE_PREFIXES, still subject to the same unsafe-option table.
     if head == "git" {
-        if git_words_are_read_only_query(inner) {
-            return true;
-        }
-        if git_words_have_unsafe_query_option(inner) {
-            return false;
-        }
+        return git_words_are_routine(inner);
     }
     // `tree -o <file>` writes an arbitrary path outside the write model; short
     // flags group (`-ao`), so reject any short-flag word containing `o`.
@@ -703,12 +682,7 @@ fn bash_command_is_routine(words: &[String]) -> bool {
     {
         return false;
     }
-    // `rg --pre <cmd>` runs <cmd> per searched file; `--pre-glob` only filters.
-    if head == "rg"
-        && inner
-            .iter()
-            .any(|w| w == "--pre" || w.starts_with("--pre="))
-    {
+    if rg_has_unsafe_flag(inner) {
         return false;
     }
     // kubectl with caller-controlled kubeconfig/endpoint/identity can run an
@@ -1821,6 +1795,33 @@ mod tests {
         assert_eq!(v("topgrade"), ClassifierVerdict::Block);
     }
 
+    #[test]
+    fn heuristic_git_discard_cannot_ride_a_routine_segment() {
+        let context = ClassifierContext::default();
+        for (cmd, expected) in [
+            ("timeout 5 git switch main", ClassifierVerdict::Allow),
+            ("git switch main && cargo test", ClassifierVerdict::Allow),
+            (
+                "git status && git checkout -- Makefile",
+                ClassifierVerdict::Block,
+            ),
+            ("timeout 5 git stash clear", ClassifierVerdict::Block),
+            ("git switch -C main HEAD", ClassifierVerdict::Block),
+            ("git checkout Makefile", ClassifierVerdict::Block),
+        ] {
+            assert_eq!(
+                HeuristicPermissionClassifier::classify_sync(
+                    "run_terminal_command",
+                    &AccessKind::Bash(cmd.into()),
+                    Some(cmd),
+                    &context,
+                ),
+                expected,
+                "{cmd}",
+            );
+        }
+    }
+
     /// A routine prefix must not smuggle a follow-on command: every chained
     /// segment has to be routine, and command substitution is rejected outright.
     #[test]
@@ -1915,9 +1916,7 @@ mod tests {
         assert_eq!(v("find . -type f"), ClassifierVerdict::Allow);
     }
 
-    /// `rg --pre <cmd>` executes <cmd> per searched file → must not auto-allow,
-    /// mirroring `manager.rs::rg_has_pre_flag`. `--pre-glob` only filters and
-    /// stays routine.
+    /// 搜索的执行型选项必须进入权限判断；`--pre-glob` 仍是普通过滤条件。
     #[test]
     fn heuristic_guards_rg_pre() {
         let empty = ClassifierContext::default();
@@ -1931,6 +1930,15 @@ mod tests {
         };
         assert_eq!(v("rg --pre ./pre.sh TODO ."), ClassifierVerdict::Block);
         assert_eq!(v("rg --pre=./pre.sh TODO ."), ClassifierVerdict::Block);
+        for cmd in [
+            "rg --hostname-bin=./payload needle",
+            "rg --hostname-bin ./payload needle",
+            "timeout 5 rg --hostname-bin ./payload needle",
+            "rg needle . && rg --hostname-bin=./payload needle",
+            "/usr/bin/rg --hostname-bin=./payload needle",
+        ] {
+            assert_eq!(v(cmd), ClassifierVerdict::Block, "{cmd}");
+        }
         assert_eq!(v("rg --pre-glob '*.pdf' TODO ."), ClassifierVerdict::Allow);
         assert_eq!(v("rg TODO ."), ClassifierVerdict::Allow);
     }

@@ -71,6 +71,15 @@ fn normalized_program_name(words: &[String]) -> Option<String> {
     Some(name)
 }
 
+/// ripgrep 的这两个选项会执行外部程序，不能继承普通搜索的自动授权。
+pub(crate) fn rg_has_unsafe_flag(words: &[String]) -> bool {
+    normalized_program_name(words).as_deref() == Some("rg")
+        && words.iter().skip(1).any(|word| {
+            let flag = word.split_once('=').map_or(word.as_str(), |(flag, _)| flag);
+            matches!(flag, "--pre" | "--hostname-bin")
+        })
+}
+
 fn is_git_program(words: &[String]) -> bool {
     normalized_program_name(words).as_deref() == Some("git")
 }

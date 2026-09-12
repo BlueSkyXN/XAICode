@@ -17,7 +17,8 @@ use crate::permission::bash_command_splitting::{
 use crate::permission::exec_risk::{
     AmbientScanPlan, SAFE_GIT_SUBCOMMANDS, ambient_exec_risk_from_plan,
     ambient_scan_plan_from_segments, git_words_are_read_only_query,
-    git_words_have_unsafe_query_option, script_may_invoke_git, segment_exec_facts,
+    git_words_have_unsafe_query_option, rg_has_unsafe_flag, script_may_invoke_git,
+    segment_exec_facts,
 };
 use crate::permission::gate_preflight::GatePreflight;
 use crate::permission::policy::{CompiledPolicy, ShellWord};
@@ -130,24 +131,6 @@ fn mcp_pre_decision(
     None
 }
 
-/// True when `words` is an `rg` invocation that enables a preprocessor.
-///
-/// `rg --pre COMMAND` (or `--pre=COMMAND`) runs `COMMAND <file>` for every
-/// searched file, so it can execute arbitrary programs. It must not ride the
-/// built-in safe-command auto-allow (unlike a pipeline, `--pre` stays one
-/// bash segment whose primary is still `rg`).
-///
-/// Deliberately does **not** match `--pre-glob`, which only filters when a
-/// preprocessor runs and does not itself spawn processes.
-fn rg_has_pre_flag(words: &[String]) -> bool {
-    if words.first().map(String::as_str) != Some("rg") {
-        return false;
-    }
-    words
-        .iter()
-        .any(|w| w == "--pre" || w.starts_with("--pre="))
-}
-
 /// True when `words` is a `kubectl` invocation that selects a caller-controlled
 /// kubeconfig, endpoint, auth, or identity.
 ///
@@ -258,7 +241,7 @@ fn is_safe_command_words(words: &[String]) -> bool {
     if words.is_empty() {
         return false;
     }
-    if rg_has_pre_flag(words) {
+    if rg_has_unsafe_flag(words) {
         return false;
     }
     if kubectl_has_unsafe_flag(words) {
@@ -320,7 +303,7 @@ fn is_safe_command_words_str(cmd: &str) -> bool {
     // to arbitrary files, enabling pipelines like `cat data | tee /target` to
     // bypass edit permissions.
     //
-    // `rg --pre` is excluded at the words level via [`rg_has_pre_flag`] — the
+    // `rg` executable options are excluded via [`rg_has_unsafe_flag`] — the
     // string form here cannot see flag structure reliably after join.
 }
 
@@ -360,7 +343,7 @@ fn is_always_safe_command_words(words: &[String]) -> bool {
     if words.is_empty() {
         return false;
     }
-    if rg_has_pre_flag(words) {
+    if rg_has_unsafe_flag(words) {
         return false;
     }
     if kubectl_has_unsafe_flag(words) {
@@ -636,7 +619,7 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         // segment grant still auto-allows below. Do NOT insert DangerousCommand —
         // that would also block exact grants.
         if (kubectl_has_unsafe_flag(words)
-            || rg_has_pre_flag(words)
+            || rg_has_unsafe_flag(words)
             || ps_dumps_environment(words)
             || git_words_have_unsafe_query_option(words))
             && !state.allowed_bash_commands.contains(&s)
@@ -4950,6 +4933,10 @@ mod tests {
                     for cmd in [
                         "kubectl get pods --kubeconfig=/tmp/evil.yaml",
                         "rg --pre ./pre.sh TODO .",
+                        "rg --hostname-bin=./payload needle",
+                        "rg --hostname-bin ./payload needle",
+                        "timeout 5 rg --hostname-bin=./payload needle",
+                        "/usr/bin/rg --hostname-bin=./payload needle",
                         "ps auxe",
                         "git cat-file --textconv HEAD:x",
                     ] {
@@ -5002,6 +4989,7 @@ mod tests {
                         ("chmod -R 777 /etc", DangerousCommand),
                         ("kill -9 1", DangerousCommand),
                         ("git push --force origin main", DangerousCommand),
+                        ("rg --hostname-bin=./payload needle", SpecialExecSurface),
                         (
                             "kubectl get pods --kubeconfig=/tmp/evil.yaml",
                             SpecialExecSurface,
@@ -6614,6 +6602,8 @@ mod tests {
         // --pre runs COMMAND per file — must not auto-allow (exec bypass).
         assert!(!is_safe_command("rg --pre cat pattern ."));
         assert!(!is_safe_command("rg --pre=/bin/cat pattern ."));
+        assert!(!is_safe_command("rg --hostname-bin=./payload needle"));
+        assert!(!is_safe_command("rg --hostname-bin ./payload needle"));
         assert!(!is_safe_command("rg -n --pre ./wrapper pattern"));
         assert!(!is_safe_command(
             "rg --pre-glob '*.pdf' --pre pdftotext pattern"
@@ -6729,6 +6719,10 @@ mod tests {
         // `rg --pre` is not fully safe-listed, so do not narrow to bare `rg`.
         assert_eq!(
             default_always_allow_scope(&words("rg --pre cat pattern")),
+            2
+        );
+        assert_eq!(
+            default_always_allow_scope(&words("rg --hostname-bin=./payload needle")),
             2
         );
         assert_eq!(
@@ -7204,6 +7198,45 @@ mod tests {
         match evaluate_bash_segments(cmd, &exact_state) {
             SegmentEvaluation::AutoAllow { .. } => {}
             other => panic!("exact grant must auto-allow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_rg_exec_flags_preserve_exact_but_not_prefix_grants() {
+        for cmd in [
+            "rg --hostname-bin=./payload needle",
+            "rg --hostname-bin ./payload needle",
+            "rg --pre=./payload needle",
+            "/usr/bin/rg --hostname-bin=./payload needle",
+        ] {
+            let mut state = PermissionState::default();
+            state.allowed_bash_commands.insert("rg".into());
+            state.allowed_bash_globs.insert("*rg*".into());
+            let evaluation = evaluate_bash(cmd, &state, true);
+            assert!(
+                matches!(evaluation.segments, SegmentEvaluation::NeedsPrompts { .. }),
+                "{cmd}"
+            );
+            assert!(
+                evaluation
+                    .assessment
+                    .contains(ClassifierSecurityFinding::SpecialExecSurface),
+                "{cmd}"
+            );
+
+            state.allowed_bash_commands.insert(cmd.into());
+            let evaluation = evaluate_bash(cmd, &state, true);
+            assert!(
+                matches!(evaluation.segments, SegmentEvaluation::AutoAllow { .. }),
+                "{cmd}"
+            );
+            assert!(evaluation.exact_grant, "{cmd}");
+            assert!(
+                !evaluation
+                    .assessment
+                    .contains(ClassifierSecurityFinding::SpecialExecSurface),
+                "{cmd}"
+            );
         }
     }
 
