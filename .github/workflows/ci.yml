@@ -125,7 +125,8 @@ jobs:
         run: cargo test -p xaicode --all-targets
 
       - name: Validate workspace permission regressions
-        run: cargo test -p xai-grok-workspace --lib permission::
+        run: |
+          cargo test -p xai-grok-workspace --lib permission::
 
   clean-boundary:
     name: "clean provider boundary / ubuntu"
